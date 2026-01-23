@@ -142,6 +142,8 @@ class ExcelSchemaIndexer:
         for idx, dist in zip(indices[0], distances[0]):
             if idx < len(self.metadata):
                 result = self.metadata[idx].copy()
+                # Dynamically update file_path based on current environment
+                result['file_path'] = os.path.join(self.excel_folder, result['file_name'])
                 result['relevance_score'] = float(dist)
                 results.append(result)
         
