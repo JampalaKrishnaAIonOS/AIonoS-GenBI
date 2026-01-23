@@ -1,6 +1,4 @@
-const API_BASE_URL = window.location.hostname === 'localhost'
-  ? 'http://localhost:8000'
-  : 'https://genbi-backend-xg3d.onrender.com';
+const API_BASE_URL = 'http://localhost:8000';
 
 export const chatService = {
   async streamChat(question, sessionId, conversationHistory, onMessage) {
