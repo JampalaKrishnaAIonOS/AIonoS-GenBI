@@ -16,7 +16,7 @@ const ChatInterface = () => {
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
   const streamedAnswerRef = useRef('');
-  const streamedMetaRef = useRef({ source: null, table: null, chart: null, code: null });
+  const streamedMetaRef = useRef({ source: [], table: null, chart: null, code: null });
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -39,7 +39,8 @@ const ChatInterface = () => {
       case 'answer_start':
         streamedAnswerRef.current = '';
         setStreamingWords([]);
-        setCurrentMessage(prev => ({ ...prev, answer: '', source: null, table: null, chart: null, code: null }));
+        streamedMetaRef.current.source = [];
+        setCurrentMessage(prev => ({ ...prev, answer: '', source: [], table: null, chart: null, code: null }));
         break;
 
       case 'status':
@@ -52,8 +53,11 @@ const ChatInterface = () => {
         break;
 
       case 'source':
-        streamedMetaRef.current.source = data.content;
-        setCurrentMessage(prev => ({ ...prev, source: data.content }));
+        streamedMetaRef.current.source.push(data.content);
+        setCurrentMessage(prev => ({
+          ...prev,
+          source: [...streamedMetaRef.current.source]
+        }));
         break;
 
       case 'table':
@@ -83,7 +87,7 @@ const ChatInterface = () => {
 
         setMessages(prev => [...prev, finalMsg]);
         streamedAnswerRef.current = '';
-        streamedMetaRef.current = { source: null, table: null, chart: null, code: null };
+        streamedMetaRef.current = { source: [], table: null, chart: null, code: null };
         setCurrentMessage({});
         setStreamingWords([]);
         setIsStreaming(false);

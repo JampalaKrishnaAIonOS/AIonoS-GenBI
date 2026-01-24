@@ -8,6 +8,7 @@ import pandas as pd
 from contextlib import asynccontextmanager
 import json
 import numpy as np
+from pathlib import Path
 
 def sanitize_for_json(obj):
     """Recursively convert numpy/pandas types to standard Python types for JSON serialization."""
@@ -60,8 +61,20 @@ async def lifespan(app: FastAPI):
     indexer = ExcelSchemaIndexer(excel_folder, index_path)
     
     # Load existing index or create new
-    if not indexer.load_index():
-        print("📊 Creating initial index...")
+    index_loaded = indexer.load_index()
+    
+    # Verify index matches files on disk
+    needs_reindex = not index_loaded
+    if index_loaded:
+        current_files = {f.name for f in Path(excel_folder).glob("*.xlsx") if not f.name.startswith('~$')}
+        indexed_files = {m['file_name'] for m in indexer.metadata}
+        
+        if current_files != indexed_files:
+            print(f"⚠️ Index out of sync. Folder has {len(current_files)} files, Index has {len(indexed_files)}. Re-indexing...")
+            needs_reindex = True
+            
+    if needs_reindex:
+        print("📊 Creating/Updating index...")
         indexer.index_all_sheets()
     
     # Initialize Groq agent
@@ -149,6 +162,12 @@ async def stream_response_generator(question: str, session_id: str, conversation
             yield json.dumps({"type": "error", "content": "No relevant data found."}) + "\n"
             return
         
+        # Build dfs = all relevant sheets
+        dfs = {}
+        for sheet in relevant_sheets:
+            key = f"{sheet['file_name']}::{sheet['sheet_name']}"
+            dfs[key] = pd.read_excel(sheet['file_path'], sheet_name=sheet['sheet_name'])
+
         # Use top match
         best_match = relevant_sheets[0]
         file_path = best_match['file_path']
@@ -176,7 +195,7 @@ async def stream_response_generator(question: str, session_id: str, conversation
         yield json.dumps({"type": "status", "content": "⚡ Executing analysis..."}) + "\n"
         await asyncio.sleep(0.1)
         
-        execution_result = agent.execute_code(code, df)
+        execution_result = agent.execute_code(code, df, dfs)
         
         if execution_result['type'] == 'error':
             yield json.dumps({
@@ -204,15 +223,18 @@ async def stream_response_generator(question: str, session_id: str, conversation
         
         yield json.dumps({"type": "answer_end"}) + "\n"
         
-        # Step 5: Send source information
-        source_info = {
-            "file_name": file_name,
-            "sheet_name": sheet_name,
-            "rows_used": f"1-{len(df)}",
-            "columns_used": list(df.columns)
-        }
-        
-        yield json.dumps({"type": "source", "content": source_info}) + "\n"
+        # Step 5: Send source information for ALL used sheets
+        for sheet in relevant_sheets:
+            key = f"{sheet['file_name']}::{sheet['sheet_name']}"
+            if key in dfs:
+                sub_df = dfs[key]
+                source_info = {
+                    "file_name": sheet['file_name'],
+                    "sheet_name": sheet['sheet_name'],
+                    "rows_used": f"1-{len(sub_df)}",
+                    "columns_used": list(sub_df.columns)
+                }
+                yield json.dumps({"type": "source", "content": source_info}) + "\n"
         
         # Step 6: Send table data if applicable
         if execution_result['type'] in ['dataframe', 'series']:

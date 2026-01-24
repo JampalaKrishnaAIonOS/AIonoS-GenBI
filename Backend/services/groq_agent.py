@@ -78,6 +78,37 @@ You: df['sales'].sum()
 
 User: "Show top 5 products by revenue"
 You: df.groupby('product')['revenue'].sum().sort_values(ascending=False).head(5)
+
+HYBRID DATA ACCESS RULES (CRITICAL):
+
+You have access to TWO variables:
+
+1. df  
+- Represents the SINGLE best-matching sheet.
+- Use this for questions about a specific plant, file, or sheet.
+
+2. dfs  
+- A dictionary of ALL relevant sheets.
+- Key: "filename::sheetname"
+- Value: pandas DataFrame
+
+YOU MUST CHOOSE CORRECTLY:
+
+- If the user asks about:
+  "this sheet", "Barh", "Kudgi", "Dadri", "this plant"
+  → Use df
+
+- If the user asks about:
+  "all sheets", "combined", "across plants", "overall", "total across files"
+  → Use dfs
+
+EXAMPLES:
+
+Single-sheet:
+df['total_cost'].sum()
+
+Multi-sheet:
+sum(d['total_cost'].sum() for d in dfs.values())
 """
         return prompt
 
@@ -153,7 +184,7 @@ You: df.groupby('product')['revenue'].sum().sort_values(ascending=False).head(5)
         except Exception as e:
             raise Exception(f"Groq API Error: {str(e)}")
     
-    def execute_code(self, code: str, df: pd.DataFrame) -> Dict[str, Any]:
+    def execute_code(self, code: str, df: pd.DataFrame, dfs: Dict[str, pd.DataFrame] = None) -> Dict[str, Any]:
         """Safely execute pandas code and return results"""
         code = (code or '').strip()
 
@@ -203,8 +234,30 @@ You: df.groupby('product')['revenue'].sum().sort_values(ascending=False).head(5)
         except ImportError:
             stats = None
             
-        safe_globals = {"__builtins__": {}}
-        local_vars = {'df': df, 'pd': pd, 'np': np, 'stats': stats}
+        # Define safe built-ins
+        safe_builtins = {
+            'abs': abs, 'all': all, 'any': any, 'ascii': ascii, 'bin': bin, 'bool': bool,
+            'bytearray': bytearray, 'bytes': bytes, 'callable': callable, 'chr': chr,
+            'complex': complex, 'delattr': delattr, 'dict': dict, 'divmod': divmod,
+            'enumerate': enumerate, 'filter': filter, 'float': float, 'format': format,
+            'frozenset': frozenset, 'getattr': getattr, 'hasattr': hasattr, 'hash': hash,
+            'hex': hex, 'id': id, 'int': int, 'isinstance': isinstance, 'issubclass': issubclass,
+            'iter': iter, 'len': len, 'list': list, 'map': map, 'max': max, 'min': min,
+            'next': next, 'object': object, 'oct': oct, 'ord': ord, 'pow': pow,
+            'print': print, 'property': property, 'range': range, 'repr': repr,
+            'reversed': reversed, 'round': round, 'set': set, 'setattr': setattr,
+            'slice': slice, 'sorted': sorted, 'str': str, 'sum': sum, 'super': super,
+            'tuple': tuple, 'type': type, 'vars': vars, 'zip': zip
+        }
+        
+        safe_globals = {"__builtins__": safe_builtins}
+        local_vars = {
+            'df': df,
+            'dfs': dfs, 
+            'pd': pd, 
+            'np': np, 
+            'stats': stats
+        }
 
         # Log the code for debugging
         print("--- Executing generated code ---")

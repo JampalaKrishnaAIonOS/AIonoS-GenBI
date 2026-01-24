@@ -35,9 +35,17 @@ const MessageBubble = ({ message, isUser }) => {
             )
           )}
 
-          {/* Source badge */}
+          {/* Source badge(s) */}
           {!isUser && message.source && (
-            <SourceBadge source={message.source} />
+            <div className="sources-container">
+              {Array.isArray(message.source) ? (
+                message.source.map((s, idx) => (
+                  <SourceBadge key={idx} source={s} />
+                ))
+              ) : (
+                <SourceBadge source={message.source} />
+              )}
+            </div>
           )}
 
           {/* Table data */}

@@ -54,8 +54,21 @@ class ExcelSchemaIndexer:
     
     def index_all_sheets(self):
         """Index all sheets from all Excel files"""
-        print("🔍 Starting Excel indexing...")
+        print("🧹 Clearing old index files and state...")
+        self.metadata = []
+        self.index = None
         
+        # Forcefully delete old files from disk
+        if os.path.exists(self.index_path):
+            for f in ['sheets.index', 'metadata.pkl']:
+                f_path = os.path.join(self.index_path, f)
+                if os.path.exists(f_path):
+                    try:
+                        os.remove(f_path)
+                    except Exception as e:
+                        print(f"⚠️ Could not delete {f}: {e}")
+
+        print("🔍 Starting fresh Excel indexing...")
         excel_files = list(Path(self.excel_folder).glob("*.xlsx"))
         print(f"Found {len(excel_files)} Excel files")
         
@@ -81,7 +94,15 @@ class ExcelSchemaIndexer:
                 print(f"  ✗ Error reading {excel_file.name}: {e}")
         
         if not all_schemas:
-            print("⚠️  No sheets found to index!")
+            print("⚠️  No sheets found to index! Clearing index...")
+            self.metadata = []
+            self.index = None
+            # Handle index folder cleaning
+            if os.path.exists(self.index_path):
+                for f in ['sheets.index', 'metadata.pkl']:
+                    f_path = os.path.join(self.index_path, f)
+                    if os.path.exists(f_path):
+                        os.remove(f_path)
             return
         
         # Create embeddings
