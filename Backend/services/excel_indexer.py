@@ -148,24 +148,56 @@ class ExcelSchemaIndexer:
             return False
     
     def search_relevant_sheets(self, query: str, top_k: int = 3) -> List[Dict]:
-        """Find most relevant sheets for a query"""
+        """Find most relevant sheets for a query with keyword boosting"""
         if self.index is None:
             return []
         
-        # Embed query
+        # 1. Broaden search to get candidates
+        # We fetch more results (e.g. 10) to allow re-ranking to pull up relevant files
+        broad_k = min(len(self.metadata), 10)
         query_embedding = self.embedding_model.encode([query])
         
         # Search
-        distances, indices = self.index.search(query_embedding.astype('float32'), top_k)
+        distances, indices = self.index.search(query_embedding.astype('float32'), broad_k)
         
-        # Return relevant sheets
-        results = []
+        candidates = []
+        unique_indices = set()
+        
         for idx, dist in zip(indices[0], distances[0]):
-            if idx < len(self.metadata):
+            if idx < len(self.metadata) and idx not in unique_indices:
+                unique_indices.add(idx)
                 result = self.metadata[idx].copy()
                 # Dynamically update file_path based on current environment
                 result['file_path'] = os.path.join(self.excel_folder, result['file_name'])
-                result['relevance_score'] = float(dist)
-                results.append(result)
+                result['relevance_score'] = float(dist) # Lower is better in L2
+                candidates.append(result)
         
-        return results
+        # 2. Re-rank based on keyword matching
+        # If the user explicitly names a file/plant (e.g. "Dadri"), strictly prioritize it.
+        query_tokens = set(query.lower().split())
+        
+        for cand in candidates:
+            filename = cand['file_name'].lower()
+            sheetname = cand['sheet_name'].lower()
+            
+            # Calculate keyword matches
+            matches = 0
+            for token in query_tokens:
+                # Ignore short words to prevent false positives (the, for, and...)
+                if len(token) < 3: 
+                    continue
+                    
+                # Exact substring match
+                if token in filename or token in sheetname:
+                    matches += 1
+            
+            # Apply massive boost for matches
+            # L2 distances are usually < 2.0. Subtracting 10.0 puts matches firmly at the top.
+            if matches > 0:
+                cand['relevance_score'] -= (matches * 10.0)
+                
+        # 3. Sort by adjusted score (ascending)
+        candidates.sort(key=lambda x: x['relevance_score'])
+        
+        # Return top_k
+        return candidates[:top_k]

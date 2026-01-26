@@ -223,10 +223,27 @@ async def stream_response_generator(question: str, session_id: str, conversation
         
         yield json.dumps({"type": "answer_end"}) + "\n"
         
-        # Step 5: Send source information for ALL used sheets
+        # Step 5: Send source information for ACTUALLY used sheets
+        # 1. Always include the best match (since 'df' maps to it) if accessed_keys is empty or code likely used it
+        # 2. Include any other keys touched in 'dfs'
+        
+        accessed_keys = set(execution_result.get('accessed_keys', []))
+        best_match_key = f"{best_match['file_name']}::{best_match['sheet_name']}"
+        
+        # If no specific dfs keys were touched, assume only the primary df was used.
+        # If dfs keys WERE touched, we include them. 
+        # We always implicitly trust the primary df was context unless proven otherwise, 
+        # but to be cleaner: if accessed_keys exists, it means the user logic reached into dfs.
+        
+        final_source_keys = set()
+        final_source_keys.add(best_match_key) # Always safe to show the primary context
+        final_source_keys.update(accessed_keys)
+        
         for sheet in relevant_sheets:
             key = f"{sheet['file_name']}::{sheet['sheet_name']}"
-            if key in dfs:
+            
+            # ONLY send source if it was actually in the final set of used keys
+            if key in final_source_keys and key in dfs:
                 sub_df = dfs[key]
                 source_info = {
                     "file_name": sheet['file_name'],

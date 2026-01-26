@@ -388,7 +388,6 @@ body {
   border-radius: 10px;
   font-size: 13px;
   color: var(--primary-dark);
-  margin: 12px 0;
   border: 1px solid #d0d9ff;
   font-weight: 500;
 }
@@ -768,4 +767,3 @@ body {
   color: #999999;
   text-align: center;
 }
-

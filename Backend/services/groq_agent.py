@@ -62,6 +62,7 @@ class GroqPandasAgent:
     NEVER use `.append()`.
 - LIBRARIES: You have access to `df` (DataFrame), `pd` (pandas), `np` (numpy), and `stats` (scipy.stats).
 - CRITICAL: DO NOT WRITE ANY `import` STATEMENTS. The necessary libraries are already provided in the execution environment. Any code containing `import` will be rejected.
+- SYNTAX WARNING: `df.columns` and `df.index` are properties, NOT functions. Do not write `df.columns()`. Use `df.columns`.
 - To calculate correlation significance: Use `stats.pearsonr(df['col1'], df['col2'])`.
 - To use numpy: Use `np.mean()`, etc.
 - For broad requests like "summarize the data" or "give me insights":
@@ -251,9 +252,31 @@ sum(d['total_cost'].sum() for d in dfs.values())
         }
         
         safe_globals = {"__builtins__": safe_builtins}
+        
+        # 1. Access Tracking Wrapper
+        class AccessTrackingDict(dict):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.accessed_keys = set()
+            def __getitem__(self, key):
+                self.accessed_keys.add(key)
+                return super().__getitem__(key)
+            def get(self, key, default=None):
+                self.accessed_keys.add(key)
+                return super().get(key, default)
+            def values(self):
+                self.accessed_keys.update(self.keys())
+                return super().values()
+            def items(self):
+                self.accessed_keys.update(self.keys())
+                return super().items()
+
+        # Wrap dfs to track usage
+        tracked_dfs = AccessTrackingDict(dfs) if dfs else None
+        
         local_vars = {
             'df': df,
-            'dfs': dfs, 
+            'dfs': tracked_dfs, 
             'pd': pd, 
             'np': np, 
             'stats': stats
@@ -277,7 +300,7 @@ sum(d['total_cost'].sum() for d in dfs.values())
                     result = local_vars['result']
                 else:
                     # Pick last non-df/pd variable as best-effort result
-                    candidates = [v for k, v in local_vars.items() if k not in ('df', 'pd')]
+                    candidates = [v for k, v in local_vars.items() if k not in ('df', 'pd', 'dfs', 'np', 'stats')]
                     result = candidates[-1] if candidates else None
 
             except SyntaxError as se2:
@@ -302,34 +325,42 @@ sum(d['total_cost'].sum() for d in dfs.values())
                 'code': code
             }
 
+        # Retrieve accessed keys
+        accessed_keys = list(tracked_dfs.accessed_keys) if tracked_dfs else []
+
         # Process result based on type
         try:
             if isinstance(result, pd.DataFrame):
                 return {
                     'type': 'dataframe',
                     'data': result,
-                    'rows_returned': len(result)
+                    'rows_returned': len(result),
+                    'accessed_keys': accessed_keys
                 }
             elif isinstance(result, pd.Series):
                 return {
                     'type': 'series',
                     'data': result,
-                    'length': len(result)
+                    'length': len(result),
+                    'accessed_keys': accessed_keys
                 }
             elif isinstance(result, (int, float, str)):
                 return {
                     'type': 'scalar',
-                    'data': result
+                    'data': result,
+                    'accessed_keys': accessed_keys
                 }
             elif result is None:
                 return {
                     'type': 'other',
-                    'data': 'No direct result returned from executed code.'
+                    'data': 'No direct result returned from executed code.',
+                    'accessed_keys': accessed_keys
                 }
             else:
                 return {
                     'type': 'other',
-                    'data': str(result)
+                    'data': str(result),
+                    'accessed_keys': accessed_keys
                 }
         except Exception as e:
             return {
