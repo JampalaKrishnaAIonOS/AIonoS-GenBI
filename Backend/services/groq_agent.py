@@ -183,6 +183,10 @@ YOU MUST CHOOSE CORRECTLY:
   → Use `df.sort_values(by='col', ascending=False).head(5)`
   → If across multiple plants, use `pd.concat(dfs.values())` first and then sort.
 
+- If the user asks for comparison across plants:
+  → Every DataFrame in `dfs` has an automatically added column: `plant_identity` (the name of the plant/file).
+  → You can use `combined = pd.concat(dfs.values())` and then `combined.groupby('plant_identity')`.
+
 EXAMPLES:
 
 Single-sheet:
@@ -194,6 +198,10 @@ sum(d['total_cost'].sum() for d in dfs.values())
 Top N across multiple files:
 combined = pd.concat(dfs.values())
 combined.sort_values('allocation', ascending=False).head(5)['total_cost'].sum()
+
+Group by plant:
+combined = pd.concat(dfs.values())
+combined.groupby('plant_identity')['total_cost'].sum()
 """
         return prompt
 
@@ -369,6 +377,17 @@ combined.sort_values('allocation', ascending=False).head(5)['total_cost'].sum()
             'stats': stats
         }
 
+        # 1.4 Inject Plant Identity (CRITICAL for cross-plant grouping)
+        # We add a virtual column 'plant_identity' to each DF in dfs so LLM can group by it.
+        if dfs:
+            for name, d in dfs.items():
+                if 'plant_identity' not in d.columns:
+                    # Extract a clean plant name from the filename
+                    plant_name = name.split('::')[0].replace('optimized_octsiding_savings_', '').replace('siding_Merit_', '').replace('.xlsx', '')
+                    d['plant_identity'] = plant_name
+        if df is not None and 'plant_identity' not in df.columns:
+            df['plant_identity'] = "Current Data"
+
         # Log the code for debugging
         print("--- Executing generated code ---")
         print(code)
@@ -483,7 +502,13 @@ combined.sort_values('allocation', ascending=False).head(5)['total_cost'].sum()
             check_dict = dfs if dfs else {'df': df}
             for name, d in check_dict.items():
                 for col in requested_cols:
+                    # RELAXED GUARDRAIL: Allow columns that the LLM is clearly assigning/creating 
+                    # If it's a new column like df['new_cost'], don't fail.
                     if col not in d.columns:
+                        # Check if this column is being assigned in the code (simple heuristic)
+                        if re.search(r"\[['\"]" + re.escape(col) + r"['\"]\]\s*=", code):
+                            continue
+                        
                         return {
                             'type': 'error',
                             'error': f"Column '{col}' not found. Available columns in {name}: {list(d.columns)}",
