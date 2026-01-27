@@ -156,7 +156,10 @@ async def stream_response_generator(question: str, session_id: str, conversation
         yield json.dumps({"type": "status", "content": "🔍 Searching relevant data..."}) + "\n"
         await asyncio.sleep(0.1)
         
-        relevant_sheets = indexer.search_relevant_sheets(question, top_k=3)
+        if any(k in question.lower() for k in ['all', 'across', 'combined', 'overall']):
+            relevant_sheets = indexer.metadata
+        else:
+            relevant_sheets = indexer.search_relevant_sheets(question, top_k=3)
         
         if not relevant_sheets:
             yield json.dumps({"type": "error", "content": "No relevant data found."}) + "\n"
@@ -195,7 +198,7 @@ async def stream_response_generator(question: str, session_id: str, conversation
         yield json.dumps({"type": "status", "content": "⚡ Executing analysis..."}) + "\n"
         await asyncio.sleep(0.1)
         
-        execution_result = agent.execute_code(code, df, dfs)
+        execution_result = agent.execute_code(code, df, dfs, question=question)
         
         if execution_result['type'] == 'error':
             yield json.dumps({
@@ -276,16 +279,31 @@ async def stream_response_generator(question: str, session_id: str, conversation
             yield json.dumps({"type": "table", "content": table_data}) + "\n"
             
             # Step 7: Generate chart if appropriate
-            if any(keyword in question.lower() for keyword in ['plot', 'chart', 'graph', 'show', 'visualize']):
+            # FIX 3: Reset plot intent when user says "just / only"
+            skip_chart = any(k in question.lower() for k in ['just', 'only', 'table', 'list'])
+            
+            if not skip_chart and any(keyword in question.lower() for keyword in ['plot', 'chart', 'graph', 'show', 'visualize']):
                 # Detect chart type explicitly and pass it to generator for deterministic behavior
                 chart_type = ChartGenerator.detect_chart_type(question, data)
-                chart = ChartGenerator.generate_chart(
-                    data,
-                    chart_type=chart_type,
-                    title=question
-                )
-                if chart:
-                    yield json.dumps({"type": "chart", "content": chart}) + "\n"
+                
+                # FIX 2: Histogram must use numeric columns only
+                chart_data = data
+                if chart_type == 'histogram':
+                    numeric_cols = data.select_dtypes(include='number').columns
+                    if len(numeric_cols) == 0:
+                        yield json.dumps({"type": "error", "content": "Histogram requires numeric data."}) + "\n"
+                        chart_data = None
+                    else:
+                        chart_data = data[numeric_cols]
+                
+                if chart_data is not None:
+                    chart = ChartGenerator.generate_chart(
+                        chart_data,
+                        chart_type=chart_type,
+                        title=question
+                    )
+                    if chart:
+                        yield json.dumps({"type": "chart", "content": chart}) + "\n"
         
         # Step 8: Send executed code
         yield json.dumps({"type": "code", "content": code}) + "\n"

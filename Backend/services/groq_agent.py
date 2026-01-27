@@ -7,6 +7,61 @@ import re
 import traceback
 import ast
 
+METRIC_INTENTS = {
+    "cost": ["cost", "amount", "value", "price", "rs", "usd", "savings"],
+    "quantity": ["qty", "quantity", "volume", "count", "units", "tonnage"],
+    "energy": ["energy", "kcal", "mw", "power", "gwh", "mu"],
+    "percentage": ["percent", "%", "ratio", "share", "allocation"]
+}
+
+def infer_best_numeric_column(df: pd.DataFrame, intent_keywords: list) -> Optional[str]:
+    """Dynamically infer the best numeric column based on intent keywords and heuristics"""
+    candidates = []
+
+    # Get only numeric columns
+    numeric_df = df.select_dtypes(include=['number'])
+    
+    for col in numeric_df.columns:
+        score = 0
+        col_name = str(col).lower()
+
+        # 1. Name Similarity (highest weight)
+        for kw in intent_keywords:
+            if kw in col_name:
+                score += 5  # Increased weight for keyword match
+
+        # Get data sample for heuristics
+        series = df[col].dropna()
+        if series.empty:
+            continue
+
+        # 2. Heuristics (generic, domain-free)
+        # Positive values are more likely to be metrics of interest
+        if (series >= 0).all():
+            score += 1
+            
+        # Non-zero values are better
+        if series.nunique() > 1:
+            score += 1
+            
+        # Large values often indicate totals/costs
+        if series.mean() > 100:
+            score += 1
+
+        candidates.append((col, score))
+
+    if not candidates:
+        return None
+
+    # Sort by score descending, then by original column order as tie-breaker
+    candidates.sort(key=lambda x: x[1], reverse=True)
+    
+    # Only return if the best score is significantly positive
+    if candidates[0][1] > 0:
+        return candidates[0][0]
+    
+    return None
+
 class GroqPandasAgent:
     def __init__(self, api_key: str):
         self.client = Groq(api_key=api_key)
@@ -22,6 +77,13 @@ class GroqPandasAgent:
             dtype = str(df[col].dtype)
             sample_vals = df[col].dropna().head(3).tolist()
             columns_info.append(f"  - {col} ({dtype}): {sample_vals}")
+        
+        COLUMN_ALIASES = {
+            'coal cost': ['coal_cost', 'total_coal_cost'],
+            'freight cost': ['freight_cost', 'total_freight_cost'],
+            'cost per 1000 kcal': ['cost_per_1000_kcal', 'cost_1000_kcal'],
+            'energy': ['total_energy', 'energy_sent_out', 'energy_generated']
+        }
         
         prompt = f"""You are a data analyst assistant working with a pandas DataFrame.
 
@@ -54,6 +116,19 @@ class GroqPandasAgent:
     Do NOT return Plotly JSON or call plotting libraries from the generated code.
 - When the user explicitly specifies a chart type (for example: "pie", "line", "bar"), preserve that intent exactly.
     Do NOT reinterpret, generalize, or override the requested chart type in the generated code.
+
+- CRITICAL FILE RULE:
+    Never hardcode file paths or filenames.
+    Always access data via `df` (single sheet) or `dfs` (multi-sheet dictionary).
+    DO NOT call pd.read_excel() inside generated code.
+
+- CRITICAL COLUMN RULE:
+    Before using any column name, verify it exists in df.columns (or each DataFrame in dfs).
+    If a column does not exist, choose the closest matching column from the schema.
+    If user mentions a metric, map it to the closest matching column using these known aliases if applicable:
+    {json.dumps(COLUMN_ALIASES, indent=4)}
+    NEVER assume column names.
+
 - CRITICAL: NEITHER `df.append()` NOR `series.append()` exist in modern pandas (2.0+). 
     They will cause an IMMEDIATE crash.
     To combine results, ALWAYS use `pd.concat([item1, item2])`. 
@@ -117,9 +192,11 @@ sum(d['total_cost'].sum() for d in dfs.values())
         """Heuristic to decide if the user's question is asking for data analysis."""
         q = (question or '').lower()
         keywords = [
-            'analyz', 'summar', 'plot', 'chart', 'graph', 'visualiz', 'mean', 'median',
-            'sum', 'total', 'count', 'compare', 'correl', 'regress', 'trend', 'show',
-            'top', 'bottom', 'groupby', 'aggregate', 'filter', 'select', 'rows', 'columns'
+            'analyz', 'summar', 'plot', 'chart', 'graph', 'visualiz', 
+            'mean', 'median', 'average', 'avg',
+            'sum', 'total', 'count', 'percentage', 'percent', 'split',
+            'compare', 'correl', 'regress', 'trend', 'calculate', 'efficien',
+            'show', 'top', 'bottom', 'groupby', 'aggregate', 'filter', 'select', 'rows', 'columns'
         ]
         return any(kw in q for kw in keywords)
 
@@ -185,9 +262,10 @@ sum(d['total_cost'].sum() for d in dfs.values())
         except Exception as e:
             raise Exception(f"Groq API Error: {str(e)}")
     
-    def execute_code(self, code: str, df: pd.DataFrame, dfs: Dict[str, pd.DataFrame] = None) -> Dict[str, Any]:
+    def execute_code(self, code: str, df: pd.DataFrame, dfs: Dict[str, pd.DataFrame] = None, question: str = "") -> Dict[str, Any]:
         """Safely execute pandas code and return results"""
         code = (code or '').strip()
+        question_lower = (question or "").lower()
 
         # Hard guard and auto-fix for deprecated .append() usage
         if ".append(" in code:
@@ -287,6 +365,103 @@ sum(d['total_cost'].sum() for d in dfs.values())
         print(code)
         print("--- End generated code ---")
 
+        # GENBI OVERRIDE: Intent-driven execution for simple aggregations and comparisons
+        # If the user asks for a 'total', 'sum', 'overall', OR 'compare'/'scatter', we calculate it directly from the schema.
+        is_agg = any(k in question_lower for k in ['total', 'sum', 'overall', 'combined'])
+        is_comp = any(k in question_lower for k in ['compare', 'scatter', 'vs', 'plot']) and len(dfs or {}) > 1
+
+        if is_agg or is_comp:
+            check_dict = dfs if dfs else {'df': df}
+            accessed_keys = list(check_dict.keys())
+
+            if is_comp:
+                # Resolve TWO metrics for comparison (e.g., cost vs energy)
+                found_intents = []
+                for intent, keywords in METRIC_INTENTS.items():
+                    if intent in question_lower:
+                        found_intents.append((intent, keywords))
+                
+                if len(found_intents) >= 2:
+                    rows = []
+                    intent_x, keywords_x = found_intents[0]
+                    intent_y, keywords_y = found_intents[1]
+
+                    for name, d in check_dict.items():
+                        col_x = infer_best_numeric_column(d, keywords_x)
+                        col_y = infer_best_numeric_column(d, keywords_y)
+
+                        if col_x and col_y:
+                            # Extract and normalize
+                            tmp = d[[col_x, col_y]].copy()
+                            tmp.columns = [f"{intent_x}", f"{intent_y}"]
+                            tmp['source'] = name
+                            rows.append(tmp)
+                    
+                    if rows:
+                        combined_df = pd.concat(rows, ignore_index=True)
+                        print(f"⚡ GENBI OVERRIDE: Executed direct '{intent_x}' vs '{intent_y}' comparison.")
+                        return {
+                            'type': 'dataframe',
+                            'data': combined_df,
+                            'rows_returned': len(combined_df),
+                            'accessed_keys': accessed_keys
+                        }
+
+            # Fallback to single metric aggregation if not comparison or comparison failed
+            for intent, keywords in METRIC_INTENTS.items():
+                if intent in question_lower:
+                    totals = {}
+                    for name, d in check_dict.items():
+                        col = infer_best_numeric_column(d, keywords)
+                        if not col:
+                            return {
+                                'type': 'error',
+                                'error': f"Could not infer a '{intent}' metric from schema of {name}. Available columns: {list(d.columns)}"
+                            }
+                        totals[name] = d[col].sum()
+
+                    result_df = pd.DataFrame.from_dict(
+                        totals, orient='index', columns=[f'total_{intent}']
+                    )
+                    
+                    if any(k in question_lower for k in ['average', 'mean', 'avg']):
+                        # If user asked for average across plants
+                        avg_val = result_df[f'total_{intent}'].mean()
+                        print(f"⚡ GENBI OVERRIDE: Executed direct '{intent}' average across plants.")
+                        return {
+                            'type': 'scalar',
+                            'data': f"Average {intent} across plants: {avg_val:.2f}",
+                            'accessed_keys': accessed_keys
+                        }
+
+                    print(f"⚡ GENBI OVERRIDE: Executed direct '{intent}' aggregation.")
+                    return {
+                        'type': 'dataframe',
+                        'data': result_df,
+                        'rows_returned': len(result_df),
+                        'accessed_keys': accessed_keys
+                    }
+
+        # 2. Column existence enforcement (CRITICAL GUARDRAIL)
+        try:
+            # Pattern matches ['column_name'] or ["column_name"]
+            # Correctly handles multi-column selections like [['col1', 'col2']]
+            requested_cols = (
+                re.findall(r"\['([^']+)'\]", code) +
+                re.findall(r'\["([^"]+)"\]', code)
+            )
+            check_dict = dfs if dfs else {'df': df}
+            for name, d in check_dict.items():
+                for col in requested_cols:
+                    if col not in d.columns:
+                        return {
+                            'type': 'error',
+                            'error': f"Column '{col}' not found. Available columns in {name}: {list(d.columns)}",
+                            'code': code
+                        }
+        except Exception:
+            pass
+
         # First try eval (works when model returns a single expression)
         try:
             result = eval(code, safe_globals, local_vars)
@@ -352,15 +527,15 @@ sum(d['total_cost'].sum() for d in dfs.values())
                 }
             elif result is None:
                 return {
-                    'type': 'other',
-                    'data': 'No direct result returned from executed code.',
-                    'accessed_keys': accessed_keys
+                    'type': 'error',
+                    'error': "No calculable result produced (result is None). Ensure the analysis returns a value, Series, or DataFrame.",
+                    'code': code
                 }
             else:
                 return {
-                    'type': 'other',
-                    'data': str(result),
-                    'accessed_keys': accessed_keys
+                    'type': 'error',
+                    'error': f"No calculable result produced. Result type '{type(result).__name__}' is not recognized for reporting.",
+                    'code': code
                 }
         except Exception as e:
             return {
