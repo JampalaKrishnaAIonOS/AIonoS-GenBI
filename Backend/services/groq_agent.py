@@ -178,13 +178,21 @@ YOU MUST CHOOSE CORRECTLY:
   "all sheets", "combined", "across plants", "overall", "total across files"
   → Use dfs
 
+- If the user asks about specific rankings ("top 5", "highest", "best rank"):
+  → Use `df.sort_values(by='col', ascending=False).head(5)`
+  → If across multiple plants, use `pd.concat(dfs.values())` first and then sort.
+
 EXAMPLES:
 
 Single-sheet:
 df['total_cost'].sum()
 
-Multi-sheet:
+Multi-sheet Total (across and sum totals of all files):
 sum(d['total_cost'].sum() for d in dfs.values())
+
+Top N across multiple files:
+combined = pd.concat(dfs.values())
+combined.sort_values('allocation', ascending=False).head(5)['total_cost'].sum()
 """
         return prompt
 
@@ -367,7 +375,10 @@ sum(d['total_cost'].sum() for d in dfs.values())
 
         # GENBI OVERRIDE: Intent-driven execution for simple aggregations and comparisons
         # If the user asks for a 'total', 'sum', 'overall', OR 'compare'/'scatter', we calculate it directly from the schema.
-        is_agg = any(k in question_lower for k in ['total', 'sum', 'overall', 'combined'])
+        # FIX: Exclude queries that involve ranking (top, bottom, best, etc.) as they require row-level logic
+        ranking_keywords = ['top', 'bottom', 'best', 'worst', 'highest', 'lowest', 'rank', 'limit', 'head', 'tail']
+        is_ranking = any(k in question_lower for k in ranking_keywords)
+        is_agg = any(k in question_lower for k in ['total', 'sum', 'overall', 'combined']) and not is_ranking
         is_comp = any(k in question_lower for k in ['compare', 'scatter', 'vs', 'plot']) and len(dfs or {}) > 1
 
         if is_agg or is_comp:
