@@ -174,7 +174,9 @@ class ExcelSchemaIndexer:
         
         # 2. Re-rank based on keyword matching
         # If the user explicitly names a file/plant (e.g. "Dadri"), strictly prioritize it.
-        query_tokens = set(query.lower().split())
+        import re
+        clean_query = re.sub(r'[^\w\s]', ' ', query.lower())
+        query_tokens = set(clean_query.split())
         
         for cand in candidates:
             filename = cand['file_name'].lower()

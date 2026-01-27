@@ -227,24 +227,33 @@ combined.groupby('plant_identity')['total_cost'].sum()
             'mean', 'median', 'average', 'avg',
             'sum', 'total', 'count', 'percentage', 'percent', 'split',
             'compare', 'correl', 'regress', 'trend', 'calculate', 'efficien',
-            'show', 'top', 'bottom', 'groupby', 'aggregate', 'filter', 'select', 'rows', 'columns'
+            'show', 'top', 'bottom', 'groupby', 'aggregate', 'filter', 'select', 'rows', 'columns',
+            'merit', 'rank', 'order'
         ]
         return any(kw in q for kw in keywords)
 
-    def generate_conversational_reply(self, question: str, conversation_history: List[Dict] = None) -> str:
-        """Return a conversational reply from the LLM (no code)."""
-        # Build a light system prompt that asks the model to reply conversationally
+    def generate_conversational_reply(self, question: str, conversation_history: List[Dict] = None, metadata: List[Dict] = None) -> str:
+        """Return a conversational reply from the LLM (no code), aware of available data."""
+        
+        data_context = ""
+        if metadata:
+            data_context = "\nCurrently, I have access to the following data:\n"
+            for m in metadata:
+                data_context += f"- File: {m['file_name']}, Sheet: {m['sheet_name']} ({m['row_count']} rows)\n"
+        
         system_msg = (
             "You are a helpful GenBI assistant. Answer the user's question conversationally. "
-            "If the user is asking about the data (e.g., 'what can you do?', 'what data is this?'), "
-            "explain your capabilities: you can summarize sheets, generate charts, and perform deep analysis. "
+            "If the user is asking about the data (e.g., 'what data you have?', 'what can you do?'), "
+            "provide a clear summary of the available data and your capabilities. "
+            f"{data_context}"
+            "\nYou can summarize sheets, generate charts, and perform deep analysis. "
             "Do NOT generate any code or python. Keep the reply concise, professional and helpful."
         )
 
         messages = [{"role": "system", "content": system_msg}]
         if conversation_history:
-            for msg in conversation_history[-5:]:
-                messages.append(msg)
+            # Include more history for better context
+            messages.extend(conversation_history[-10:])
 
         messages.append({"role": "user", "content": question})
 
@@ -252,12 +261,42 @@ combined.groupby('plant_identity')['total_cost'].sum()
             resp = self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
+                temperature=0.7, # Slightly higher for better conversation
+                max_tokens=400
+            )
+            return resp.choices[0].message.content.strip()
+        except Exception as e:
+            print(f"Error in conversational reply: {e}")
+            return "I have access to several data sheets. You can ask me to analyze or visualize them for you."
+
+    def explain_analysis_error(self, question: str, error_msg: str, schema_info: str = None) -> str:
+        """Explain an analysis error to the user and suggest how to ask correctly."""
+        system_msg = (
+            "You are a helpful GenBI assistant. An error occurred while trying to analyze data for a user's question. "
+            "Explain the error in simple, conversational terms (no technical jargon like 'KeyError' or 'Traceback'). "
+            "Tell the user what went wrong and how they can rephrase their question or what specific data might be missing. "
+            "Be polite and professional. If you have schema info, use it to suggest correct column names or sheet names."
+        )
+        
+        prompt = f"User Question: {question}\nError: {error_msg}\n"
+        if schema_info:
+            prompt += f"Available Schema Context: {schema_info}\n"
+        
+        prompt += "\nPlease explain this error and guide the user on how to ask the question properly according to the data."
+
+        try:
+            resp = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": prompt}
+                ],
                 temperature=0.5,
-                max_tokens=200
+                max_tokens=400
             )
             return resp.choices[0].message.content.strip()
         except Exception:
-            return "I can chat about your data and answer questions — if you'd like analysis, ask me to analyze or plot a sheet."
+            return f"I encountered an error while analyzing the data: {error_msg}. Please try rephrasing your question or specifying the relevant columns."
     
     def generate_pandas_code(self, question: str, df: pd.DataFrame, 
                             file_name: str, sheet_name: str, 

@@ -143,7 +143,8 @@ async def stream_response_generator(question: str, session_id: str, conversation
         if not agent.is_data_question(question):
             yield json.dumps({"type": "status", "content": "💬 Handling conversational query..."}) + "\n"
             await asyncio.sleep(0.05)
-            reply = agent.generate_conversational_reply(question, conversation_history)
+            # Pass all metadata to conversational reply so it knows what data is available
+            reply = agent.generate_conversational_reply(question, conversation_history, metadata=indexer.metadata)
             yield json.dumps({"type": "answer_start"}) + "\n"
             for word in (reply or '').split():
                 yield json.dumps({"type": "word", "content": word + " "}) + "\n"
@@ -162,7 +163,22 @@ async def stream_response_generator(question: str, session_id: str, conversation
             relevant_sheets = indexer.search_relevant_sheets(question, top_k=3)
         
         if not relevant_sheets:
-            yield json.dumps({"type": "error", "content": "No relevant data found."}) + "\n"
+            yield json.dumps({"type": "status", "content": "🔍 No specific match found. Checking general availability..."}) + "\n"
+            await asyncio.sleep(0.1)
+            
+            # Use conversational logic to tell user what data is available
+            reply = agent.generate_conversational_reply(
+                f"I couldn't find a specific data sheet for your request: '{question}'. Based on the data I have, what should I say?",
+                conversation_history,
+                metadata=indexer.metadata
+            )
+            
+            yield json.dumps({"type": "answer_start"}) + "\n"
+            for word in (reply or '').split():
+                yield json.dumps({"type": "word", "content": word + " "}) + "\n"
+                await asyncio.sleep(0.01)
+            yield json.dumps({"type": "answer_end"}) + "\n"
+            yield json.dumps({"type": "complete"}) + "\n"
             return
         
         # Build dfs = all relevant sheets
@@ -201,10 +217,21 @@ async def stream_response_generator(question: str, session_id: str, conversation
         execution_result = agent.execute_code(code, df, dfs, question=question)
         
         if execution_result['type'] == 'error':
-            yield json.dumps({
-                "type": "error", 
-                "content": f"Analysis error: {execution_result['error']}"
-            }) + "\n"
+            yield json.dumps({"type": "status", "content": "❌ Analysis failed. Explaining why..."}) + "\n"
+            
+            # Use LLM to explain the error and guide the user
+            schema_context = f"File: {file_name}, Sheet: {sheet_name}\nColumns: {list(df.columns)}"
+            error_explanation = agent.explain_analysis_error(question, execution_result['error'], schema_context)
+            
+            yield json.dumps({"type": "answer_start"}) + "\n"
+            for word in error_explanation.split():
+                yield json.dumps({"type": "word", "content": word + " "}) + "\n"
+                await asyncio.sleep(0.01)
+            yield json.dumps({"type": "answer_end"}) + "\n"
+            
+            # Still send the code for debugging
+            yield json.dumps({"type": "code", "content": code}) + "\n"
+            yield json.dumps({"type": "complete"}) + "\n"
             return
         
         # Step 4: Generate natural language response
