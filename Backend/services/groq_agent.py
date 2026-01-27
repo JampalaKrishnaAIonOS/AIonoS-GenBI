@@ -8,10 +8,11 @@ import traceback
 import ast
 
 METRIC_INTENTS = {
-    "cost": ["cost", "amount", "value", "price", "rs", "usd", "savings"],
-    "quantity": ["qty", "quantity", "volume", "count", "units", "tonnage"],
-    "energy": ["energy", "kcal", "mw", "power", "gwh", "mu"],
-    "percentage": ["percent", "%", "ratio", "share", "allocation"]
+    "cost": ["cost", "amount", "value", "price", "rs", "usd", "savings", "expenditure"],
+    "quantity": ["qty", "quantity", "volume", "count", "units", "tonnage", "allocated"],
+    "energy": ["energy", "kcal", "mw", "power", "gwh", "mu", "generation"],
+    "percentage": ["percent", "%", "ratio", "share", "allocation", "contribution", "pct"],
+    "rank": ["rank", "merit", "position", "order", "priority"]
 }
 
 def infer_best_numeric_column(df: pd.DataFrame, intent_keywords: list) -> Optional[str]:
@@ -452,6 +453,24 @@ combined.sort_values('allocation', ascending=False).head(5)['total_cost'].sum()
                         'rows_returned': len(result_df),
                         'accessed_keys': accessed_keys
                     }
+
+        # 1.6 Dataset Normalization (CRITICAL for Ranking/Complex Queries)
+        # LLM writes code based on 'df' (the best-match schema). 
+        # If 'dfs' contains other files with different naming (e.g. Merit files vs Optimized),
+        # we must normalize their columns to match 'df' so pd.concat() and sorting work.
+        if dfs and len(dfs) > 1:
+            for intent, keywords in METRIC_INTENTS.items():
+                # Check if the intent or any of its keywords appear in the question
+                if intent in question_lower or any(kw in question_lower for kw in keywords):
+                    # The LLM is likely to use the column name from the 'best match' (df)
+                    target_col = infer_best_numeric_column(df, keywords)
+                    if target_col:
+                        for name, d in dfs.items():
+                            inferred = infer_best_numeric_column(d, keywords)
+                            if inferred and inferred != target_col:
+                                # Rename the column in the tracked DataFrame
+                                d.rename(columns={inferred: target_col}, inplace=True)
+                                print(f"🔄 Schema Alignment: Normalized {name} column '{inferred}' -> '{target_col}'")
 
         # 2. Column existence enforcement (CRITICAL GUARDRAIL)
         try:
