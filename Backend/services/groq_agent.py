@@ -8,11 +8,12 @@ import traceback
 import ast
 
 METRIC_INTENTS = {
-    "cost": ["cost", "amount", "value", "price", "rs", "usd", "savings", "expenditure"],
-    "quantity": ["qty", "quantity", "volume", "count", "units", "tonnage", "allocated"],
-    "energy": ["energy", "kcal", "mw", "power", "gwh", "mu", "generation"],
-    "percentage": ["percent", "%", "ratio", "share", "allocation", "contribution", "pct"],
-    "rank": ["rank", "merit", "position", "order", "priority"]
+    "total_cost": ["cost", "amount", "value", "price", "rs", "usd", "savings", "expenditure", "final_cost"],
+    "total_quantity": ["qty", "quantity", "volume", "count", "units", "tonnage", "allocated"],
+    "total_energy": ["energy", "kcal", "mw", "power", "gwh", "mu", "generation", "heat"],
+    "allocation_percentage": ["percent", "%", "ratio", "share", "allocation", "contribution", "pct"],
+    "merit_rank": ["rank", "merit", "position", "order", "priority"],
+    "cost_per_1000_kcal": ["cost_per", "per_1000", "kcal_cost", "unit_cost", "cost_kcal", "rate"]
 }
 
 def infer_best_numeric_column(df: pd.DataFrame, intent_keywords: list) -> Optional[str]:
@@ -69,6 +70,19 @@ class GroqPandasAgent:
         # Use model from environment when provided (keeps default for older setups)
         self.model = os.getenv('MODEL_NAME', 'moonshotai/kimi-k2-instruct')
         
+    def standardize_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Standardize metric column names in a DataFrame based on intent heuristics"""
+        if df is None or df.empty:
+            return df
+            
+        for standard_name, keywords in METRIC_INTENTS.items():
+            current_col = infer_best_numeric_column(df, keywords)
+            if current_col and current_col != standard_name:
+                # Rename the column to the standard name
+                df.rename(columns={current_col: standard_name}, inplace=True)
+                print(f"🪄 Standardized Column: '{current_col}' -> '{standard_name}'")
+        return df
+
     def create_system_prompt(self, df: pd.DataFrame, file_name: str, sheet_name: str) -> str:
         """Create a detailed system prompt with DataFrame context"""
         
@@ -250,6 +264,9 @@ combined.groupby('plant_identity')['total_cost'].sum()
                             conversation_history: List[Dict] = None) -> str:
         """Generate pandas code using Groq LLM"""
         
+        # Standardize the primary DF before creating the prompt so LLM uses standard names
+        df = self.standardize_dataframe(df.copy())
+        
         system_prompt = self.create_system_prompt(df, file_name, sheet_name)
         
         messages = [{"role": "system", "content": system_prompt}]
@@ -369,6 +386,18 @@ combined.groupby('plant_identity')['total_cost'].sum()
         # Wrap dfs to track usage
         tracked_dfs = AccessTrackingDict(dfs) if dfs else None
         
+        if df is not None:
+            self.standardize_dataframe(df)
+            if 'plant_identity' not in df.columns:
+                df['plant_identity'] = "Current Data"
+        
+        if dfs:
+            for name, d in dfs.items():
+                self.standardize_dataframe(d)
+                if 'plant_identity' not in d.columns:
+                    plant_name = name.split('::')[0].replace('optimized_octsiding_savings_', '').replace('siding_Merit_', '').replace('.xlsx', '')
+                    d['plant_identity'] = plant_name
+
         local_vars = {
             'df': df,
             'dfs': tracked_dfs, 
@@ -376,17 +405,6 @@ combined.groupby('plant_identity')['total_cost'].sum()
             'np': np, 
             'stats': stats
         }
-
-        # 1.4 Inject Plant Identity (CRITICAL for cross-plant grouping)
-        # We add a virtual column 'plant_identity' to each DF in dfs so LLM can group by it.
-        if dfs:
-            for name, d in dfs.items():
-                if 'plant_identity' not in d.columns:
-                    # Extract a clean plant name from the filename
-                    plant_name = name.split('::')[0].replace('optimized_octsiding_savings_', '').replace('siding_Merit_', '').replace('.xlsx', '')
-                    d['plant_identity'] = plant_name
-        if df is not None and 'plant_identity' not in df.columns:
-            df['plant_identity'] = "Current Data"
 
         # Log the code for debugging
         print("--- Executing generated code ---")
@@ -473,23 +491,6 @@ combined.groupby('plant_identity')['total_cost'].sum()
                         'accessed_keys': accessed_keys
                     }
 
-        # 1.6 Dataset Normalization (CRITICAL for Ranking/Complex Queries)
-        # LLM writes code based on 'df' (the best-match schema). 
-        # If 'dfs' contains other files with different naming (e.g. Merit files vs Optimized),
-        # we must normalize their columns to match 'df' so pd.concat() and sorting work.
-        if dfs and len(dfs) > 1:
-            for intent, keywords in METRIC_INTENTS.items():
-                # Check if the intent or any of its keywords appear in the question
-                if intent in question_lower or any(kw in question_lower for kw in keywords):
-                    # The LLM is likely to use the column name from the 'best match' (df)
-                    target_col = infer_best_numeric_column(df, keywords)
-                    if target_col:
-                        for name, d in dfs.items():
-                            inferred = infer_best_numeric_column(d, keywords)
-                            if inferred and inferred != target_col:
-                                # Rename the column in the tracked DataFrame
-                                d.rename(columns={inferred: target_col}, inplace=True)
-                                print(f"🔄 Schema Alignment: Normalized {name} column '{inferred}' -> '{target_col}'")
 
         # 2. Column existence enforcement (CRITICAL GUARDRAIL)
         try:
