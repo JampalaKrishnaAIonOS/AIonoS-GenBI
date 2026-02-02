@@ -4,16 +4,28 @@ FIXED Backend Main - Properly handles conversation context and visualization
 
 import os
 import asyncio
+import logging
+import json
+import numpy as np
+from pathlib import Path
+from typing import List
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from dotenv import load_dotenv
 import pandas as pd
 from contextlib import asynccontextmanager
-import json
-import numpy as np
-from pathlib import Path
-from typing import List
+import langchain
+
+# --- LOGGING CONFIGURATION ---
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+langchain.verbose = True
+# -----------------------------
+
 
 # Services
 from services.excel_to_sql_sync import ExcelToSQLSync
@@ -22,6 +34,7 @@ from services.file_watcher_sql import start_file_watcher_sql
 from services.chart_generator import ChartGenerator
 from services.session_manager import SessionManager
 from models.schemas import ChatRequest
+
 
 load_dotenv()
 
@@ -121,6 +134,8 @@ async def health():
 async def stream_response_generator(question: str, session_id: str, conversation_history: List):
     """Stream SQL agent response with proper table and chart support"""
     try:
+        logger.info(f"Processing question: {question} (session: {session_id})")
+        
         # Get session for context
         session = session_manager.get_session(session_id)
         question_lower = question.lower().strip()
