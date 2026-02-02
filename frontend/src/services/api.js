@@ -28,6 +28,12 @@ export const chatService = {
         try {
           const data = JSON.parse(line);
           onMessage(data);
+
+          // 🔥 Stop stream immediately on error or completion
+          if (data.type === 'error' || data.type === 'complete') {
+            await reader.cancel();
+            return;
+          }
         } catch (e) {
           console.error('Parse error:', e);
         }

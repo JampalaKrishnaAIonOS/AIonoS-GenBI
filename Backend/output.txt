@@ -1,0 +1,5 @@
+Excel folder: C:/Users/J RISHI KRISHNA/Downloads/AIonoS-GenBI/Backend/excel_data
+DB URL: sqlite:///genbi.db
+Synced 3 tables
+Failed: 0 tables
+Tables List: ['coalenergcost_plantmasterdata_sheet1', 'merged_rack_optimization_oct25_results_3plants_sheet1', 'meritorder_by_sidingcoalcomapny_fuldata_sheet1']

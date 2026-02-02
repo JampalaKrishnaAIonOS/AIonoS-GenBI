@@ -39,7 +39,7 @@ const ChatInterface = () => {
       case 'answer_start':
         streamedAnswerRef.current = '';
         setStreamingWords([]);
-        streamedMetaRef.current.source = [];
+        streamedMetaRef.current = { source: [], table: null, chart: null, code: null };
         setCurrentMessage(prev => ({ ...prev, answer: '', source: [], table: null, chart: null, code: null }));
         break;
 
@@ -81,7 +81,7 @@ const ChatInterface = () => {
           source: streamedMetaRef.current.source,
           table: streamedMetaRef.current.table,
           chart: streamedMetaRef.current.chart,
-          code: streamedMetaRef.current.code,
+          // code: streamedMetaRef.current.code, // Removed: Don't store code in messages
           isUser: false
         };
 

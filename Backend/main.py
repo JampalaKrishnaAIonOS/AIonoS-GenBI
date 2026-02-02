@@ -1,3 +1,7 @@
+"""
+FIXED Backend Main - Properly handles conversation context and visualization
+"""
+
 import os
 import asyncio
 from fastapi import FastAPI, HTTPException
@@ -9,9 +13,20 @@ from contextlib import asynccontextmanager
 import json
 import numpy as np
 from pathlib import Path
+from typing import List
+
+# Services
+from services.excel_to_sql_sync import ExcelToSQLSync
+from services.sql_agent import SQLAgent
+from services.file_watcher_sql import start_file_watcher_sql
+from services.chart_generator import ChartGenerator
+from services.session_manager import SessionManager
+from models.schemas import ChatRequest
+
+load_dotenv()
 
 def sanitize_for_json(obj):
-    """Recursively convert numpy/pandas types to standard Python types for JSON serialization."""
+    """Recursively convert numpy/pandas types to standard Python types"""
     if isinstance(obj, dict):
         return {k: sanitize_for_json(v) for k, v in obj.items()}
     elif isinstance(obj, list):
@@ -22,7 +37,7 @@ def sanitize_for_json(obj):
         return float(obj)
     elif isinstance(obj, (np.bool_, bool)):
         return bool(obj)
-    elif isinstance(obj, (np.datetime64, pd.Timestamp)):
+    elif isinstance(obj, (np.datetime64, pd.Timestamp, pd.Period, pd.Interval)):
         return str(obj)
     elif isinstance(obj, np.ndarray):
         return sanitize_for_json(obj.tolist())
@@ -30,73 +45,53 @@ def sanitize_for_json(obj):
         return None
     return obj
 
-from models.schemas import ChatRequest, ChatResponse, SourceInfo, TableData, ChartData
-from services.excel_indexer import ExcelSchemaIndexer
-from services.file_watcher import start_file_watcher
-from services.groq_agent import GroqPandasAgent
-from services.chart_generator import ChartGenerator
-from services.session_manager import SessionManager
-
-# Load environment
-load_dotenv()
-
 # Global instances
-indexer = None
-agent = None
+sql_sync = None
+sql_agent = None
 session_manager = SessionManager()
 file_observer = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events"""
-    global indexer, agent, file_observer
+    global sql_sync, sql_agent, file_observer
     
-    print("🚀 Starting Excel Analytics Chatbot...")
+    print("🚀 Starting GenBI SQL-based Chatbot...")
     
-    # Initialize indexer
     excel_folder = os.getenv('EXCEL_FOLDER_PATH')
-    index_path = os.getenv('FAISS_INDEX_PATH')
+    db_url = os.getenv('DATABASE_URL', 'sqlite:///genbi.db')
     groq_api_key = os.getenv('GROQ_API_KEY')
+    model_name = os.getenv('MODEL_NAME', 'llama-3.1-70b-versatile')
     
-    indexer = ExcelSchemaIndexer(excel_folder, index_path)
+    # Initialize SQL sync
+    sql_sync = ExcelToSQLSync(excel_folder, db_url)
     
-    # Load existing index or create new
-    index_loaded = indexer.load_index()
+    print("📊 Syncing Excel files to database...")
+    try:
+        results = sql_sync.sync_all_excel_files()
+        print(f"✅ Synced {len(results['success'])} tables")
+    except Exception as e:
+        print(f"❌ Initial sync failed: {e}")
     
-    # Verify index matches files on disk
-    needs_reindex = not index_loaded
-    if index_loaded:
-        current_files = {f.name for f in Path(excel_folder).glob("*.xlsx") if not f.name.startswith('~$')}
-        indexed_files = {m['file_name'] for m in indexer.metadata}
-        
-        if current_files != indexed_files:
-            print(f"⚠️ Index out of sync. Folder has {len(current_files)} files, Index has {len(indexed_files)}. Re-indexing...")
-            needs_reindex = True
-            
-    if needs_reindex:
-        print("📊 Creating/Updating index...")
-        indexer.index_all_sheets()
-    
-    # Initialize Groq agent
-    agent = GroqPandasAgent(groq_api_key)
+    # Initialize SQL Agent
+    sql_agent = SQLAgent(db_url, groq_api_key, model_name)
     
     # Start file watcher
-    file_observer = start_file_watcher(excel_folder, indexer)
-    
-    print("✅ System ready!")
+    try:
+        file_observer = start_file_watcher_sql(excel_folder, sql_sync)
+    except Exception as e:
+        print(f"⚠️ Failed to start file watcher: {e}")
     
     yield
     
-    # Shutdown
     if file_observer:
         file_observer.stop()
         file_observer.join()
-    print("👋 Shutting down...")
+    
+    print("🛑 GenBI Chatbot stopped")
 
-# Create FastAPI app
-app = FastAPI(title="Excel Analytics Chatbot", lifespan=lifespan)
+app = FastAPI(title="GenBI SQL Chatbot", lifespan=lifespan)
 
-# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -107,255 +102,143 @@ app.add_middleware(
 
 @app.get("/")
 async def root():
-    return {"status": "Excel Analytics Chatbot is running!"}
+    return {"status": "GenBI SQL Chatbot is running!"}
 
 @app.get("/health")
 async def health():
+    tables = []
+    if sql_sync:
+        try:
+            tables = sql_sync.list_all_tables()
+        except:
+            pass
     return {
         "status": "healthy",
-        "indexed_sheets": len(indexer.metadata) if indexer else 0
+        "synced_tables": len(tables)
     }
 
-@app.get("/sheets")
-async def list_sheets():
-    """List all indexed sheets"""
-    if not indexer or not indexer.metadata:
-        return {"sheets": []}
-    
-    sheets = [
-        {
-            "file": m['file_name'],
-            "sheet": m['sheet_name'],
-            "columns": [c['name'] for c in m['columns']],
-            "rows": m['row_count']
-        }
-        for m in indexer.metadata
-    ]
-    return {"sheets": sheets}
-
-async def stream_response_generator(question: str, session_id: str, conversation_history: list):
-    """Generate streaming response word by word"""
-    
+# FIXED STREAM RESPONSE GENERATOR
+async def stream_response_generator(question: str, session_id: str, conversation_history: List):
+    """Stream SQL agent response with proper table and chart support"""
     try:
-        # Get session
+        # Get session for context
         session = session_manager.get_session(session_id)
-        # If the user's question is not data-oriented, reply conversationally instead
-        if not agent.is_data_question(question):
-            yield json.dumps({"type": "status", "content": "💬 Handling conversational query..."}) + "\n"
-            await asyncio.sleep(0.05)
-            # Pass all metadata to conversational reply so it knows what data is available
-            reply = agent.generate_conversational_reply(question, conversation_history, metadata=indexer.metadata)
-            yield json.dumps({"type": "answer_start"}) + "\n"
-            for word in (reply or '').split():
-                yield json.dumps({"type": "word", "content": word + " "}) + "\n"
-                await asyncio.sleep(0.02)
-            yield json.dumps({"type": "answer_end"}) + "\n"
-            yield json.dumps({"type": "complete"}) + "\n"
-            return
+        question_lower = question.lower().strip()
         
-        # Step 1: Find relevant sheets
-        yield json.dumps({"type": "status", "content": "🔍 Searching relevant data..."}) + "\n"
-        await asyncio.sleep(0.1)
+        # ✅ HANDLE "PLOT IT" OR "SHOW CHART" FOR PREVIOUS DATA
+        is_plot_only = question_lower in ['plot it', 'show chart', 'visualize it', 'plot', 'chart it']
         
-        if any(k in question.lower() for k in ['all', 'across', 'combined', 'overall']):
-            relevant_sheets = indexer.metadata
-        else:
-            relevant_sheets = indexer.search_relevant_sheets(question, top_k=3)
-        
-        if not relevant_sheets:
-            yield json.dumps({"type": "status", "content": "🔍 No specific match found. Checking general availability..."}) + "\n"
+        if is_plot_only:
+            last_df = session.get('last_dataframe')
+            if last_df is None:
+                yield json.dumps({"type": "error", "content": "No previous data available to plot. Please ask a data question first."}) + "\n"
+                yield json.dumps({"type": "complete"}) + "\n"
+                return
+            
+            yield json.dumps({"type": "status", "content": "Generating visualization for previous data..."}) + "\n"
             await asyncio.sleep(0.1)
             
-            # Use conversational logic to tell user what data is available
-            reply = agent.generate_conversational_reply(
-                f"I couldn't find a specific data sheet for your request: '{question}'. Based on the data I have, what should I say?",
-                conversation_history,
-                metadata=indexer.metadata
-            )
+            # Use last DF for chart
+            df = last_df
+            answer = "Here is the visualization of the data we just discussed."
+            sql_query = None
+            result_type = 'dataframe'
+        else:
+            # Status update
+            yield json.dumps({"type": "status", "content": "Generating SQL query..."}) + "\n"
+            await asyncio.sleep(0.1)
             
-            yield json.dumps({"type": "answer_start"}) + "\n"
-            for word in (reply or '').split():
-                yield json.dumps({"type": "word", "content": word + " "}) + "\n"
-                await asyncio.sleep(0.01)
-            yield json.dumps({"type": "answer_end"}) + "\n"
-            yield json.dumps({"type": "complete"}) + "\n"
-            return
-        
-        # Build dfs = all relevant sheets
-        dfs = {}
-        for sheet in relevant_sheets:
-            key = f"{sheet['file_name']}::{sheet['sheet_name']}"
-            dfs[key] = pd.read_excel(sheet['file_path'], sheet_name=sheet['sheet_name'])
+            # ✅ PASS CONVERSATION HISTORY TO SQL AGENT
+            result = sql_agent.query(question, conversation_history=conversation_history)
+            
+            if not result['success']:
+                yield json.dumps({"type": "error", "content": result.get('error', 'Unknown error')}) + "\n"
+                yield json.dumps({"type": "complete"}) + "\n"
+                return # 🔥 REQUIRED: Stop thinking
+            
+            answer = result['answer']
+            sql_query = result['sql_query']
+            df = result['data']
+            result_type = result['type']
+            
+            # Store in session for "plot it"
+            if df is not None and not df.empty:
+                session['last_dataframe'] = df
 
-        # Use top match
-        best_match = relevant_sheets[0]
-        file_path = best_match['file_path']
-        sheet_name = best_match['sheet_name']
-        file_name = best_match['file_name']
-        
-        yield json.dumps({
-            "type": "status", 
-            "content": f"📊 Analyzing {file_name} - {sheet_name}..."
-        }) + "\n"
-        await asyncio.sleep(0.1)
-        
-        # Load DataFrame
-        df = pd.read_excel(file_path, sheet_name=sheet_name)
-        
-        # Step 2: Generate pandas code
-        yield json.dumps({"type": "status", "content": "🧠 Generating analysis code..."}) + "\n"
-        await asyncio.sleep(0.1)
-        
-        code = agent.generate_pandas_code(
-            question, df, file_name, sheet_name, conversation_history
-        )
-        
-        # Step 3: Execute code
-        yield json.dumps({"type": "status", "content": "⚡ Executing analysis..."}) + "\n"
-        await asyncio.sleep(0.1)
-        
-        execution_result = agent.execute_code(code, df, dfs, question=question)
-        
-        if execution_result['type'] == 'error':
-            yield json.dumps({"type": "status", "content": "❌ Analysis failed. Explaining why..."}) + "\n"
-            
-            # Use LLM to explain the error and guide the user
-            schema_context = f"File: {file_name}, Sheet: {sheet_name}\nColumns: {list(df.columns)}"
-            error_explanation = agent.explain_analysis_error(question, execution_result['error'], schema_context)
-            
-            yield json.dumps({"type": "answer_start"}) + "\n"
-            for word in error_explanation.split():
-                yield json.dumps({"type": "word", "content": word + " "}) + "\n"
-                await asyncio.sleep(0.01)
-            yield json.dumps({"type": "answer_end"}) + "\n"
-            
-            # Still send the code for debugging
-            yield json.dumps({"type": "code", "content": code}) + "\n"
-            yield json.dumps({"type": "complete"}) + "\n"
-            return
-        
-        # Step 4: Generate natural language response
-        answer = agent.generate_natural_response(
-            question, execution_result, file_name, sheet_name
-        )
-        
-        # Stream answer while preserving newlines and spaces
+        # Stream answer with markdown formatting
         yield json.dumps({"type": "answer_start"}) + "\n"
         
-        # Use regex to split by whitespace but KEEP the whitespace tokens
         import re
         tokens = re.split(r'(\s+)', answer)
         for token in tokens:
-            if not token: continue
-            yield json.dumps({"type": "word", "content": token}) + "\n"
-            # Slightly faster stream since we have more tokens now
-            await asyncio.sleep(0.01)
+            if token:
+                yield json.dumps({"type": "word", "content": token}) + "\n"
+                await asyncio.sleep(0.01)
         
         yield json.dumps({"type": "answer_end"}) + "\n"
         
-        # Step 5: Send source information for ACTUALLY used sheets
-        # 1. Always include the best match (since 'df' maps to it) if accessed_keys is empty or code likely used it
-        # 2. Include any other keys touched in 'dfs'
+        # Send SQL query for transparency
+        if sql_query:
+            yield json.dumps({"type": "code", "content": sql_query}) + "\n"
         
-        accessed_keys = set(execution_result.get('accessed_keys', []))
-        best_match_key = f"{best_match['file_name']}::{best_match['sheet_name']}"
-        
-        # If no specific dfs keys were touched, assume only the primary df was used.
-        # If dfs keys WERE touched, we include them. 
-        # We always implicitly trust the primary df was context unless proven otherwise, 
-        # but to be cleaner: if accessed_keys exists, it means the user logic reached into dfs.
-        
-        final_source_keys = set()
-        final_source_keys.add(best_match_key) # Always safe to show the primary context
-        final_source_keys.update(accessed_keys)
-        
-        for sheet in relevant_sheets:
-            key = f"{sheet['file_name']}::{sheet['sheet_name']}"
-            
-            # ONLY send source if it was actually in the final set of used keys
-            if key in final_source_keys and key in dfs:
-                sub_df = dfs[key]
-                source_info = {
-                    "file_name": sheet['file_name'],
-                    "sheet_name": sheet['sheet_name'],
-                    "rows_used": f"1-{len(sub_df)}",
-                    "columns_used": list(sub_df.columns)
-                }
-                yield json.dumps({"type": "source", "content": source_info}) + "\n"
-        
-        # Step 6: Send table data if applicable
-        if execution_result['type'] in ['dataframe', 'series']:
-            data = execution_result['data']
-            
-            if isinstance(data, pd.Series):
-                data = data.reset_index()
-                data.columns = ['Category', 'Value']
-            elif isinstance(data, pd.DataFrame):
-                # If index is not standard numbers (like in .describe()), include it
-                if not isinstance(data.index, pd.RangeIndex) or (not data.index.is_numeric() and len(data) > 0):
-                    data = data.reset_index()
-            
-            # Limit to 100 rows for display
-            display_df = data.head(100)
-            
+        # ✅ SEND TABLE DATA IF DATAFRAME EXISTS
+        if result_type == 'dataframe' and df is not None:
+            # Prepare table data for frontend
             table_data = {
-                "headers": [str(c) for c in display_df.columns],
-                "rows": sanitize_for_json(display_df.values.tolist())
+                "id": f"table_{hash(str(df.columns))}",
+                "columns": [str(c) for c in df.columns],
+                "rows": sanitize_for_json(df.head(100).to_dict(orient="records"))
             }
-            
             yield json.dumps({"type": "table", "content": table_data}) + "\n"
             
-            # Step 7: Generate chart if appropriate
-            # FIX 3: Reset plot intent when user says "just / only"
-            skip_chart = any(k in question.lower() for k in ['just', 'only', 'table', 'list'])
+            # ✅ AUTO-GENERATE CHART IF USER ASKS FOR VISUALIZATION
+            skip_chart = any(k in question_lower for k in ['just', 'only', 'table', 'list'])
             
-            if not skip_chart and any(keyword in question.lower() for keyword in ['plot', 'chart', 'graph', 'show', 'visualize']):
-                # Detect chart type explicitly and pass it to generator for deterministic behavior
-                chart_type = ChartGenerator.detect_chart_type(question, data)
-                
-                # FIX 2: Histogram must use numeric columns only
-                chart_data = data
-                if chart_type == 'histogram':
-                    numeric_cols = data.select_dtypes(include='number').columns
-                    if len(numeric_cols) == 0:
-                        yield json.dumps({"type": "error", "content": "Histogram requires numeric data."}) + "\n"
-                        chart_data = None
-                    else:
-                        chart_data = data[numeric_cols]
-                
-                if chart_data is not None:
+            should_chart = is_plot_only or any(kw in question_lower for kw in [
+                'plot', 'chart', 'graph', 'visualize', 'show', 'display',
+                'trend', 'comparison', 'compare', 'analysis', 'distribution'
+            ])
+            
+            if not skip_chart and should_chart:
+                try:
+                    chart_type = ChartGenerator.detect_chart_type(question, df)
                     chart = ChartGenerator.generate_chart(
-                        chart_data,
-                        chart_type=chart_type,
-                        title=question
+                        df, 
+                        chart_type=chart_type, 
+                        title=question if not is_plot_only else "Data Visualization"
                     )
+                    
                     if chart:
-                        yield json.dumps({"type": "chart", "content": chart}) + "\n"
+                        # If chart returned an error payload, send it as error
+                        if chart.get('type') == 'error':
+                             yield json.dumps(chart) + "\n"
+                        else:
+                             yield json.dumps({"type": "chart", "content": chart}) + "\n"
+                except Exception as chart_err:
+                    print(f"Chart generation failed: {chart_err}")
+                    yield json.dumps({"type": "error", "content": f"Visualization failed: {str(chart_err)}"}) + "\n"
         
-        # Step 8: Send executed code
-        yield json.dumps({"type": "code", "content": code}) + "\n"
-        
-        # Update session
+        # Update session history
         session_manager.add_to_history(session_id, "user", question)
         session_manager.add_to_history(session_id, "assistant", answer)
-        session_manager.update_context(
-            session_id,
-            last_used_sheet=(file_name, sheet_name),
-            last_code=code
-        )
         
         yield json.dumps({"type": "complete"}) + "\n"
         
     except Exception as e:
-        yield json.dumps({"type": "error", "content": f"System error: {str(e)}"}) + "\n"
+        import traceback
+        traceback.print_exc()
+        error_msg = f"System error: {str(e)}"
+        yield json.dumps({"type": "error", "content": error_msg}) + "\n"
+        yield json.dumps({"type": "complete"}) + "\n"
+        return # 🔥 REQUIRED
 
 @app.post("/chat/stream")
 async def chat_stream(request: ChatRequest):
     """Stream chat response word by word"""
     return StreamingResponse(
         stream_response_generator(
-            request.question, 
-            request.session_id, 
+            request.question,
+            request.session_id,
             request.conversation_history
         ),
         media_type="text/event-stream"
@@ -363,10 +246,15 @@ async def chat_stream(request: ChatRequest):
 
 @app.post("/reindex")
 async def reindex():
-    """Manually trigger reindexing"""
+    """Manually trigger database re-sync"""
     try:
-        indexer.index_all_sheets()
-        return {"status": "success", "sheets_indexed": len(indexer.metadata)}
+        results = sql_sync.sync_all_excel_files()
+        sql_sync.remove_orphaned_tables()
+        return {
+            "status": "success",
+            "tables_synced": len(results['success']),
+            "failed": len(results['failed'])
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

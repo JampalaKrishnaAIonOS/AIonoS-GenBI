@@ -1,28 +1,16 @@
 {
-  "name": "frontend",
-  "version": "0.1.0",
+  "name": "genbi-frontend",
+  "version": "1.0.0",
   "private": true,
   "dependencies": {
-    "@testing-library/dom": "^10.4.1",
-    "@testing-library/jest-dom": "^6.9.1",
-    "@testing-library/react": "^16.3.2",
-    "@testing-library/user-event": "^13.5.0",
-    "@types/react": "^19.2.9",
-    "antd": "^6.2.1",
-    "axios": "^1.13.2",
-    "firebase": "^12.8.0",
-    "framer-motion": "^12.29.0",
-    "lucide-react": "^0.562.0",
-    "plotly.js": "^3.3.1",
-    "react": "^19.2.3",
-    "react-dom": "^19.2.3",
-    "react-markdown": "^10.1.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-router-dom": "^6.20.0",
+    "react-markdown": "^9.0.0",
+    "remark-gfm": "^4.0.0",
+    "lucide-react": "^0.294.0",
     "react-plotly.js": "^2.6.0",
-    "react-router-dom": "^6.18.0",
-    "react-scripts": "5.0.1",
-    "recharts": "^3.7.0",
-    "remark-gfm": "^4.0.1",
-    "web-vitals": "^2.1.4"
+    "plotly.js": "^2.27.0"
   },
   "scripts": {
     "start": "react-scripts start",
@@ -32,8 +20,7 @@
   },
   "eslintConfig": {
     "extends": [
-      "react-app",
-      "react-app/jest"
+      "react-app"
     ]
   },
   "browserslist": {
