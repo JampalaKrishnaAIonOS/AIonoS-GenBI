@@ -46,7 +46,9 @@ def sanitize_for_json(obj):
         return [sanitize_for_json(i) for i in obj]
     elif isinstance(obj, (np.int64, np.int32, np.int8, np.integer)):
         return int(obj)
-    elif isinstance(obj, (np.float64, np.float32, np.floating)):
+    elif isinstance(obj, (np.float64, np.float32, np.floating, float)):
+        if not np.isfinite(obj):
+            return None
         return float(obj)
     elif isinstance(obj, (np.bool_, bool)):
         return bool(obj)
@@ -75,6 +77,8 @@ async def lifespan(app: FastAPI):
     db_url = os.getenv('DATABASE_URL', 'sqlite:///genbi.db')
     groq_api_key = os.getenv('GROQ_API_KEY')
     model_name = os.getenv('MODEL_NAME', 'llama-3.1-70b-versatile')
+    llm_api_key = os.getenv('LLM_API_KEY', groq_api_key)
+    llm_base_url = os.getenv('LLM_BASE_URL')
     
     # Initialize SQL sync
     sql_sync = ExcelToSQLSync(excel_folder, db_url)
@@ -87,7 +91,7 @@ async def lifespan(app: FastAPI):
         print(f"❌ Initial sync failed: {e}")
     
     # Initialize SQL Agent
-    sql_agent = SQLAgent(db_url, groq_api_key, model_name)
+    sql_agent = SQLAgent(db_url, llm_api_key, model_name, llm_base_url)
     
     # Start file watcher
     try:
@@ -141,11 +145,23 @@ async def stream_response_generator(question: str, session_id: str, conversation
         question_lower = question.lower().strip()
         
         # ✅ HANDLE "PLOT IT" OR "SHOW CHART" FOR PREVIOUS DATA
-        is_plot_only = question_lower in ['plot it', 'show chart', 'visualize it', 'plot', 'chart it']
+        plot_keywords = ['plot', 'chart', 'visualize', 'graph', 'visual']
+        is_plot_request = any(k in question_lower for k in plot_keywords)
+        # It's a "plot only" request if it's very short and contains one of these, OR is a specific known phrase
+        is_plot_only = is_plot_request and (len(question_lower.split()) <= 4 or question_lower in ['plot it', 'show chart', 'visualize it', 'plot', 'chart it', 'graph it'])
         
         if is_plot_only:
-            last_df = session.get('last_dataframe')
-            if last_df is None:
+            last_df = session_manager.get_last_dataframe(session_id)
+            
+            # Fallback to last_result in context if last_dataframe is missing
+            if last_df is None or (isinstance(last_df, pd.DataFrame) and last_df.empty):
+                session = session_manager.get_session(session_id)
+                last_result = session.get("context", {}).get("last_result")
+                if isinstance(last_result, pd.DataFrame) and not last_result.empty:
+                    last_df = last_result
+                    logger.info("Recovered previous dataframe from context['last_result']")
+
+            if last_df is None or (isinstance(last_df, pd.DataFrame) and last_df.empty):
                 yield json.dumps({"type": "error", "content": "No previous data available to plot. Please ask a data question first."}) + "\n"
                 yield json.dumps({"type": "complete"}) + "\n"
                 return
@@ -169,16 +185,24 @@ async def stream_response_generator(question: str, session_id: str, conversation
             if not result['success']:
                 yield json.dumps({"type": "error", "content": result.get('error', 'Unknown error')}) + "\n"
                 yield json.dumps({"type": "complete"}) + "\n"
-                return # 🔥 REQUIRED: Stop thinking
+                return
             
             answer = result['answer']
             sql_query = result['sql_query']
             df = result['data']
-            result_type = result['type']
+            # HIGH CONFIDENCE LOGGING
+            logger.info(f"DEBUG after agent: success={result['success']}, df type={type(df)}, rows={len(df) if df is not None else 'None'}")
+            if result.get('success') and df is not None:
+                logger.info(f"DEBUG agent result keys: {list(result.keys())}")
+                if isinstance(df, pd.DataFrame):
+                    logger.info(f"DEBUG first few rows sample:\n{df.head(2).to_string()}")
             
-            # Store in session for "plot it"
-            if df is not None and not df.empty:
-                session['last_dataframe'] = df
+        # ALWAYS store dataframe if we have one
+        if df is not None and isinstance(df, pd.DataFrame) and not df.empty:
+            logger.info(f"DEBUG: Setting last_dataframe with {len(df)} rows")
+            session_manager.set_last_dataframe(session_id, df)
+            # Also sync to context for fallback recovery
+            session_manager.update_context(session_id, last_result=df)
 
         # Stream answer with markdown formatting
         yield json.dumps({"type": "answer_start"}) + "\n"
@@ -197,41 +221,82 @@ async def stream_response_generator(question: str, session_id: str, conversation
             yield json.dumps({"type": "code", "content": sql_query}) + "\n"
         
         # ✅ SEND TABLE DATA IF DATAFRAME EXISTS
-        if result_type == 'dataframe' and df is not None:
+        if df is not None:
             # Prepare table data for frontend
             table_data = {
-                "id": f"table_{hash(str(df.columns))}",
                 "columns": [str(c) for c in df.columns],
                 "rows": sanitize_for_json(df.head(100).to_dict(orient="records"))
             }
             yield json.dumps({"type": "table", "content": table_data}) + "\n"
             
-            # ✅ AUTO-GENERATE CHART IF USER ASKS FOR VISUALIZATION
-            skip_chart = any(k in question_lower for k in ['just', 'only', 'table', 'list'])
+            # ✅ AUTO-GENERATE CHART ONLY IF USER EXPLICITLY ASKS FOR VISUALIZATION
+            # As per user feedback, visualization should only come when mentioned (plot, chart, etc.)
+            should_chart = is_plot_request or any(kw in question_lower for kw in ['plot', 'chart', 'graph', 'visualize', 'visualization'])
             
-            should_chart = is_plot_only or any(kw in question_lower for kw in [
-                'plot', 'chart', 'graph', 'visualize', 'show', 'display',
-                'trend', 'comparison', 'compare', 'analysis', 'distribution'
-            ])
+            # Allow skipping if explicitly told not to
+            skip_chart = any(k in question_lower for k in ['no chart', 'no plot', 'without chart', 'only table', 'just table'])
+            if skip_chart:
+                should_chart = False
             
-            if not skip_chart and should_chart:
+            logger.info(f"DEBUG visualization decision: should_chart={should_chart}, is_plot_request={is_plot_request}, df_rows={len(df) if df is not None else 'None'}")
+            
+            if not skip_chart and should_chart and df is not None:
                 try:
-                    chart_type = ChartGenerator.detect_chart_type(question, df)
-                    chart = ChartGenerator.generate_chart(
-                        df, 
-                        chart_type=chart_type, 
-                        title=question if not is_plot_only else "Data Visualization"
-                    )
+                    # ✅ NEW LOGIC: Use LLM to 'write' the Plotly code/spec
+                    # This fulfills the request for intelligent, data-driven visualizations
+                    logger.info("Using LLM to generate Plotly visualization spec...")
                     
-                    if chart:
-                        # If chart returned an error payload, send it as error
-                        if chart.get('type') == 'error':
-                             yield json.dumps(chart) + "\n"
-                        else:
-                             yield json.dumps({"type": "chart", "content": chart}) + "\n"
+                    data_sample = df.head(10).to_json(orient='records')
+                    columns_info = list(df.columns)
+                    
+                    prompt = f"""You are a Plotly expert. Based on the following data and question, generate a Plotly JSON specification.
+                    
+                    Question: {question}
+                    Columns: {columns_info}
+                    Data Sample: {data_sample}
+                    
+                    RULES:
+                    1. Return ONLY a JSON object with 'data' and 'layout' keys.
+                    2. Use appropriate chart type (bar, line, pie, etc.) based on the user's intent.
+                    3. For 'barh' requests, use orientation='h' and swap x/y.
+                    4. Use a clean, professional theme (template: 'plotly_white').
+                    5. Include a clear title.
+                    6. Ensure colors are distinct and modern.
+                    7. Do not include any text before or after the JSON.
+                    
+                    JSON:"""
+                    
+                    try:
+                        # Use the fallback model (faster and cheaper) for JSON generation
+                        response = sql_agent.fallback_llm.invoke(prompt)
+                        spec_text = response.content.strip()
+                        # Clean markdown if present
+                        spec_text = spec_text.replace('```json', '').replace('```', '').strip()
+                        plotly_spec = json.loads(spec_text)
+                        
+                        chart = {
+                            'type': 'chart',
+                            'chart_type': 'llm_generated',
+                            'data': plotly_spec,
+                            'title': plotly_spec.get('layout', {}).get('title', {}).get('text', 'Data Analysis'),
+                            'rows_plotted': len(df)
+                        }
+                        
+                        if chart:
+                            logger.info(f"✅ Yielding LLM-generated chart")
+                            yield json.dumps({"type": "chart", "content": chart}) + "\n"
+                            
+                    except Exception as llm_err:
+                        logger.error(f"LLM Plotly generation failed: {llm_err}, falling back to ChartGenerator")
+                        # Fallback to the classic generator if LLM fails
+                        chart = ChartGenerator.generate_chart(df, title=question)
+                        if chart and chart.get('type') == 'chart':
+                            yield json.dumps({"type": "chart", "content": chart}) + "\n"
+                            
                 except Exception as chart_err:
-                    print(f"Chart generation failed: {chart_err}")
-                    yield json.dumps({"type": "error", "content": f"Visualization failed: {str(chart_err)}"}) + "\n"
+                    logger.error(f"Visualization pipeline failed: {chart_err}")
+                    if is_plot_request:
+                        yield json.dumps({"type": "error", "content": f"Visualization failed: {str(chart_err)}"}) + "\n"
         
         # Update session history
         session_manager.add_to_history(session_id, "user", question)

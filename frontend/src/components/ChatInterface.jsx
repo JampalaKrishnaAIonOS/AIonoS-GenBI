@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, RotateCw, Loader, Paperclip, ChevronLeft, LogOut } from 'lucide-react';
+import { Send, RotateCw, Loader, Paperclip, ChevronLeft, LogOut, ArrowDown } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import MessageBubble from './MessageBubble';
 import { chatService } from '../services/api';
@@ -11,6 +11,8 @@ const ChatInterface = () => {
   const [streamingWords, setStreamingWords] = useState([]);
   const [currentMessage, setCurrentMessage] = useState({});
   const [sessionId] = useState(() => `session_${Date.now()}`);
+  const [showScrollButton, setShowScrollButton] = useState(false);
+  const scrollRef = useRef(null);
   const navigate = useNavigate();
 
   const messagesEndRef = useRef(null);
@@ -18,8 +20,15 @@ const ChatInterface = () => {
   const streamedAnswerRef = useRef('');
   const streamedMetaRef = useRef({ source: [], table: null, chart: null, code: null });
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  const scrollToBottom = (behavior = 'smooth') => {
+    messagesEndRef.current?.scrollIntoView({ behavior });
+  };
+
+  const handleScroll = () => {
+    if (!scrollRef.current) return;
+    const { scrollTop, scrollHeight, clientHeight } = scrollRef.current;
+    const isAtBottom = scrollHeight - scrollTop - clientHeight < 100;
+    setShowScrollButton(!isAtBottom);
   };
 
   useEffect(() => {
@@ -31,7 +40,9 @@ const ChatInterface = () => {
   }, []);
 
   useEffect(() => {
-    scrollToBottom();
+    if (!showScrollButton) {
+      scrollToBottom('auto');
+    }
   }, [messages, streamingWords]);
 
   const handleStreamMessage = (data) => {
@@ -204,7 +215,11 @@ const ChatInterface = () => {
         </div>
       </header>
 
-      <main className="messages-container">
+      <main
+        className="messages-container"
+        ref={scrollRef}
+        onScroll={handleScroll}
+      >
         {messages.map((msg, idx) => (
           <MessageBubble key={idx} message={msg} isUser={msg.isUser} />
         ))}
@@ -217,6 +232,15 @@ const ChatInterface = () => {
         )}
 
         <div ref={messagesEndRef} />
+
+        {showScrollButton && (
+          <button
+            className="scroll-bottom-btn"
+            onClick={() => scrollToBottom('smooth')}
+          >
+            <ArrowDown size={20} />
+          </button>
+        )}
       </main>
 
       <footer className="input-area">

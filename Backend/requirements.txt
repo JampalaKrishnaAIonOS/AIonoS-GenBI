@@ -6,7 +6,14 @@ numpy
 openpyxl
 watchdog
 plotly
-langchain>=0.1.0
-langchain-community>=0.0.20
-langchain-groq>=0.0.1
+
+# LangChain - Modern Version for Self-Hosted Support
+langchain>=1.2.8
+langchain-community>=0.4.1
+langchain-groq>=1.1.2
+langchain-openai
+
+# Data & Connectivity
 sqlalchemy>=2.0.0
+pydantic>=2.0.0
+pydantic-settings>=2.12.0

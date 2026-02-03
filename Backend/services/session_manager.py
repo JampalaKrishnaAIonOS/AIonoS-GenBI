@@ -68,6 +68,16 @@ class SessionManager:
         session = self.get_session(session_id)
         return session.get("context", {}).get("last_result")
     
+    def set_last_dataframe(self, session_id: str, df: Any):
+        """Specifically store a dataframe for plotting/reuse"""
+        session = self.get_session(session_id)
+        session['last_dataframe'] = df
+        
+    def get_last_dataframe(self, session_id: str):
+        """Retrieve the last stored dataframe"""
+        session = self.get_session(session_id)
+        return session.get('last_dataframe')
+    
     def cleanup_old_sessions(self):
         """Remove expired sessions"""
         current_time = datetime.now()
