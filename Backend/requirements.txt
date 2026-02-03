@@ -10,7 +10,6 @@ plotly
 # LangChain - Modern Version for Self-Hosted Support
 langchain>=1.2.8
 langchain-community>=0.4.1
-langchain-groq>=1.1.2
 langchain-openai
 
 # Data & Connectivity

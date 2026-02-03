@@ -75,9 +75,8 @@ async def lifespan(app: FastAPI):
     
     excel_folder = os.getenv('EXCEL_FOLDER_PATH')
     db_url = os.getenv('DATABASE_URL', 'sqlite:///genbi.db')
-    groq_api_key = os.getenv('GROQ_API_KEY')
-    model_name = os.getenv('MODEL_NAME', 'llama-3.1-70b-versatile')
-    llm_api_key = os.getenv('LLM_API_KEY', groq_api_key)
+    model_name = os.getenv('MODEL_NAME', 'self-hosted')
+    llm_api_key = os.getenv('LLM_API_KEY', 'dummy')
     llm_base_url = os.getenv('LLM_BASE_URL')
     
     # Initialize SQL sync
@@ -267,8 +266,8 @@ async def stream_response_generator(question: str, session_id: str, conversation
                     JSON:"""
                     
                     try:
-                        # Use the fallback model (faster and cheaper) for JSON generation
-                        response = sql_agent.fallback_llm.invoke(prompt)
+                        # Use the primary self-hosted LLM for JSON generation
+                        response = sql_agent.llm.invoke(prompt)
                         spec_text = response.content.strip()
                         # Clean markdown if present
                         spec_text = spec_text.replace('```json', '').replace('```', '').strip()
