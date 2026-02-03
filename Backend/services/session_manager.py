@@ -91,3 +91,6 @@ class SessionManager:
         
         if expired:
             print(f"🧹 Cleaned up {len(expired)} expired sessions")
+
+# Global instance for shared access
+session_manager = SessionManager()

@@ -32,7 +32,7 @@ from services.excel_to_sql_sync import ExcelToSQLSync
 from services.sql_agent import SQLAgent
 from services.file_watcher_sql import start_file_watcher_sql
 from services.chart_generator import ChartGenerator
-from services.session_manager import SessionManager
+from services.session_manager import session_manager
 from models.schemas import ChatRequest
 
 
@@ -63,7 +63,6 @@ def sanitize_for_json(obj):
 # Global instances
 sql_sync = None
 sql_agent = None
-session_manager = SessionManager()
 file_observer = None
 
 @asynccontextmanager
