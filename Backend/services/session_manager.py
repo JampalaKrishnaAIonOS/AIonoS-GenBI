@@ -38,8 +38,13 @@ class SessionManager:
         })
         
         # Keep only last 10 messages
-        if len(session['conversation_history']) > 10:
-            session['conversation_history'] = session['conversation_history'][-10:]
+        self.trim_history(session_id, max_messages=10)
+
+    def trim_history(self, session_id: str, max_messages: int = 10):
+        """Trim conversation history to keep only the last N messages"""
+        session = self.get_session(session_id)
+        if len(session['conversation_history']) > max_messages:
+            session['conversation_history'] = session['conversation_history'][-max_messages:]
     
     def update_context(self, session_id: str, **kwargs):
         """Update session context"""

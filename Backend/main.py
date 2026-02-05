@@ -140,6 +140,12 @@ async def stream_response_generator(question: str, session_id: str, conversation
         
         # Get session for context
         session = session_manager.get_session(session_id)
+        
+        # ✅ Fix 6 — Add Hard Input Truncation (Safety Net)
+        if len(question) > 1000:
+            logger.warning(f"Truncating long question from {len(question)} to 1000 chars")
+            question = question[:1000]
+            
         question_lower = question.lower().strip()
         
         # ✅ HANDLE "PLOT IT" OR "SHOW CHART" FOR PREVIOUS DATA
@@ -177,8 +183,9 @@ async def stream_response_generator(question: str, session_id: str, conversation
             yield json.dumps({"type": "status", "content": "Generating SQL query..."}) + "\n"
             await asyncio.sleep(0.1)
             
-            # ✅ PASS CONVERSATION HISTORY TO SQL AGENT
-            result = sql_agent.query(question, conversation_history=conversation_history)
+            # ✅ Fix 1 — Limit Conversation History (MOST IMPORTANT)
+            short_history = conversation_history[-4:] if conversation_history else []
+            result = sql_agent.query(question, conversation_history=short_history)
             
             if not result['success']:
                 yield json.dumps({"type": "error", "content": result.get('error', 'Unknown error')}) + "\n"
@@ -240,57 +247,11 @@ async def stream_response_generator(question: str, session_id: str, conversation
             
             if not skip_chart and should_chart and df is not None:
                 try:
-                    # ✅ NEW LOGIC: Use LLM to 'write' the Plotly code/spec
-                    # This fulfills the request for intelligent, data-driven visualizations
-                    logger.info("Using LLM to generate Plotly visualization spec...")
-                    
-                    data_sample = df.head(10).to_json(orient='records')
-                    columns_info = list(df.columns)
-                    
-                    prompt = f"""You are a Plotly expert. Based on the following data and question, generate a Plotly JSON specification.
-                    
-                    Question: {question}
-                    Columns: {columns_info}
-                    Data Sample: {data_sample}
-                    
-                    RULES:
-                    1. Return ONLY a JSON object with 'data' and 'layout' keys.
-                    2. Use appropriate chart type (bar, line, pie, etc.) based on the user's intent.
-                    3. For 'barh' requests, use orientation='h' and swap x/y.
-                    4. Use a clean, professional theme (template: 'plotly_white').
-                    5. Include a clear title.
-                    6. Ensure colors are distinct and modern.
-                    7. Do not include any text before or after the JSON.
-                    
-                    JSON:"""
-                    
-                    try:
-                        # Use the primary self-hosted LLM for JSON generation
-                        response = sql_agent.llm.invoke(prompt)
-                        spec_text = response.content.strip()
-                        # Clean markdown if present
-                        spec_text = spec_text.replace('```json', '').replace('```', '').strip()
-                        plotly_spec = json.loads(spec_text)
-                        
-                        chart = {
-                            'type': 'chart',
-                            'chart_type': 'llm_generated',
-                            'data': plotly_spec,
-                            'title': plotly_spec.get('layout', {}).get('title', {}).get('text', 'Data Analysis'),
-                            'rows_plotted': len(df)
-                        }
-                        
-                        if chart:
-                            logger.info(f"✅ Yielding LLM-generated chart")
-                            yield json.dumps({"type": "chart", "content": chart}) + "\n"
-                            
-                    except Exception as llm_err:
-                        logger.error(f"LLM Plotly generation failed: {llm_err}, falling back to ChartGenerator")
-                        # Fallback to the classic generator if LLM fails
-                        chart = ChartGenerator.generate_chart(df, title=question)
-                        if chart and chart.get('type') == 'chart':
-                            yield json.dumps({"type": "chart", "content": chart}) + "\n"
-                            
+                    # 3️⃣ Send DataFrame directly to ChartGenerator
+                    logger.info("Generating chart using ChartGenerator...")
+                    chart = ChartGenerator.generate_chart(df, title=question)
+                    if chart and chart.get('type') == 'chart':
+                        yield json.dumps({"type": "chart", "content": chart}) + "\n"
                 except Exception as chart_err:
                     logger.error(f"Visualization pipeline failed: {chart_err}")
                     if is_plot_request:
@@ -299,6 +260,9 @@ async def stream_response_generator(question: str, session_id: str, conversation
         # Update session history
         session_manager.add_to_history(session_id, "user", question)
         session_manager.add_to_history(session_id, "assistant", answer)
+        
+        # ✅ Fix 7 — Clear Session Context When It Grows
+        session_manager.trim_history(session_id, max_messages=10)
         
         yield json.dumps({"type": "complete"}) + "\n"
         
