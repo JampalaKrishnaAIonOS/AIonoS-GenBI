@@ -1,118 +1,44 @@
-import React, { useState } from 'react';
+import React from 'react';
 import Plot from 'react-plotly.js';
-import { Maximize2, X, Download } from 'lucide-react';
 
+// Expects `chart` prop to be either a Plotly figure ({ data, layout })
+// or a simple object like { type: 'scatter', x: [...], y: [...], layout: {...} }
 const ChartDisplay = ({ chart }) => {
-  const [isModalOpen, setIsModalOpen] = useState(false);
+  if (!chart || (!chart.data && !chart.x)) return null;
 
-  if (!chart || !chart.data) return null;
-
-  // Extract Plotly data and layout from the chart object
-  const plotData = chart.data.data || [];
-  const plotLayout = chart.data.layout || {};
-
-  return (
-    <>
-      <div className="chart-container">
-        <div className="chart-header">
-          <div className="chart-title">
-            {chart.title || 'Visualization'}
-          </div>
-          <div className="chart-toolbar">
-            <button
-              className="chart-btn"
-              onClick={() => {
-                const gd = document.getElementById(`plot-${chart.title || 'viz'}`);
-                if (gd && window.Plotly) {
-                  window.Plotly.downloadImage(gd, {
-                    format: 'png',
-                    width: 1200,
-                    height: 800,
-                    filename: (chart.title || 'visualization').replace(/\s+/g, '_').toLowerCase()
-                  });
-                }
-              }}
-              title="Download as PNG"
-            >
-              <Download size={16} />
-            </button>
-            <button
-              className="chart-btn"
-              onClick={() => setIsModalOpen(true)}
-              title="Expand chart"
-            >
-              <Maximize2 size={16} />
-            </button>
-          </div>
-        </div>
-        <Plot
-          divId={`plot-${chart.title || 'viz'}`}
-          data={plotData}
-          layout={{
-            ...plotLayout,
-            autosize: true,
-            margin: {
-              l: chart.chart_type === 'barh' ? 120 : 50, // More space for horizontal bar labels
-              r: 30,
-              t: 50,
-              b: chart.chart_type === 'bar' ? 100 : 50 // More space for vertical bar rotating labels if needed
-            },
-            font: { family: 'Inter, sans-serif' },
-            paper_bgcolor: 'rgba(0,0,0,0)',
-            plot_bgcolor: 'rgba(0,0,0,0)',
-          }}
-          style={{ width: '100%', height: '400px' }}
-          config={{
-            responsive: true,
-            displayModeBar: 'hover',
-            displaylogo: false,
-            modeBarButtonsToRemove: ['lasso2d', 'select2d']
-          }}
-        />
-        {chart.rows_plotted && (
-          <div style={{
-            fontSize: '12px',
-            color: '#666',
-            marginTop: '8px',
-            textAlign: 'center'
-          }}>
-            Showing {chart.rows_plotted} data points
-          </div>
-        )}
+  // If the backend already provided a full figure (chart.data may contain the full fig JSON)
+  if (chart.data && chart.data.data && Array.isArray(chart.data.data)) {
+    const fig = chart.data;
+    return (
+      <div style={{ width: '100%' }}>
+        <Plot data={fig.data} layout={fig.layout || { autosize: true }} style={{ width: '100%' }} useResizeHandler />
       </div>
+    );
+  }
 
-      {isModalOpen && (
-        <div className="chart-modal" onClick={() => setIsModalOpen(false)}>
-          <div className="chart-modal-body" onClick={(e) => e.stopPropagation()}>
-            <div className="chart-modal-toolbar">
-              <div className="chart-modal-title">{chart.title || 'Visualization'}</div>
-              <button
-                className="chart-btn"
-                onClick={() => setIsModalOpen(false)}
-              >
-                <X size={20} />
-              </button>
-            </div>
-            <div style={{ padding: '20px', height: 'calc(100% - 60px)' }}>
-              <Plot
-                data={plotData}
-                layout={{
-                  ...plotLayout,
-                  autosize: true,
-                  height: 600
-                }}
-                style={{ width: '100%', height: '100%' }}
-                config={{
-                  responsive: true,
-                  displayModeBar: true,
-                  displaylogo: false
-                }}
-              />
-            </div>
-          </div>
-        </div>
-      )}
-    </>
+  if (chart.data && Array.isArray(chart.data)) {
+    return (
+      <div style={{ width: '100%' }}>
+        <Plot data={chart.data} layout={chart.layout || { autosize: true }} style={{ width: '100%' }} useResizeHandler />
+      </div>
+    );
+  }
+
+  // Otherwise try to map a simple chart description
+  if (chart.type && chart.x && chart.y) {
+    const trace = { x: chart.x, y: chart.y, type: chart.type };
+    return (
+      <div style={{ width: '100%' }}>
+        <Plot data={[trace]} layout={chart.layout || { autosize: true }} style={{ width: '100%' }} useResizeHandler />
+      </div>
+    );
+  }
+
+  // Unknown format: render JSON fallback
+  return (
+    <pre style={{ whiteSpace: 'pre-wrap', maxHeight: 300, overflow: 'auto', background: '#fafafa', padding: 8 }}>
+      {JSON.stringify(chart, null, 2)}
+    </pre>
   );
 };
 

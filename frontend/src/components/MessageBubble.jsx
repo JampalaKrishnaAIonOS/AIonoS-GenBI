@@ -6,131 +6,82 @@ import TableDisplay from './TableDisplay';
 import ChartDisplay from './ChartDisplay';
 import SourceBadge from './SourceBadge';
 
-const extractTableAndCleanText = (text) => {
-    if (!text) return { table: null, cleanText: text };
-
-    try {
-        // --- 1. Python List of Tuples Patterns ---
-        const listMatch = text.match(/\[\s*\(.*?\)\s*(?:,\s*\(.*?\)\s*)*\]/s);
-        if (listMatch) {
-            const listStr = listMatch[0];
-            const tupleRegex = /\(\s*(['"])(.*?)\1\s*,\s*(.*?)\s*\)/g;
-            const rows = [];
-            let match;
-            while ((match = tupleRegex.exec(listStr)) !== null) {
-                const category = match[2];
-                let value = match[3].trim();
-                rows.push({ "Category": category, "Value": value });
-            }
-            if (rows.length >= 2) {
-                return {
-                    table: { columns: ["Category", "Value"], rows },
-                    cleanText: text.replace(listStr, '').trim()
-                };
-            }
-        }
-
-        // --- 2. Line-by-Line List Parsing ---
-        const lines = text.split('\n');
-        const listRows = [];
-        let firstListIdx = -1;
-        let lastListIdx = -1;
-        const itemRegex = /^(\d+[\.\)]|[\*\-])\s+/;
-
-        for (let i = 0; i < lines.length; i++) {
-            const trimmed = lines[i].trim();
-            if (itemRegex.test(trimmed)) {
-                if (firstListIdx === -1) firstListIdx = i;
-                lastListIdx = i;
-                const content = trimmed.replace(itemRegex, '').trim();
-                const parts = content.split(/[:\-–—|]+/);
-                listRows.push({
-                    "ID": listRows.length + 1,
-                    "Entity": parts[0].trim(),
-                    "Info": parts.slice(1).join(' ').trim() || "-"
-                });
-            }
-        }
-
-        if (listRows.length >= 4) {
-            const before = lines.slice(0, firstListIdx).join('\n');
-            const after = lines.slice(lastListIdx + 1).join('\n');
-            return {
-                table: { columns: ["ID", "Entity", "Info"], rows: listRows },
-                cleanText: (before + '\n' + after).trim()
-            };
-        }
-    } catch (e) {
-        console.error("Extraction failed:", e);
-    }
-    return { table: null, cleanText: text };
-};
-const cleanResponseText = (text, hasExplicitData) => {
+const cleanResponseText = (text) => {
     if (!text) return text;
-    let clean = text;
-
-    // 1. Always strip SQL code blocks (we use them for backend extraction, not frontend display)
-    clean = clean.replace(/```sql[\s\S]*?```/gi, '').trim();
-
-    // 2. If we have explicit table/chart data, strip common raw data patterns
-    if (hasExplicitData) {
-        // Strip Python list of tuples/dicts
-        clean = clean.replace(/\[\s*\(.*?\)\s*(?:,\s*\(.*?\)\s*)*\]/gs, '');
-        clean = clean.replace(/\[\s*\{.*?\}\s*(?:,\s*\{.*?\}\s*)*\]/gs, '');
-
-        // Strip numbered/bulleted lists that look like data summaries (4+ items)
-        const lines = clean.split('\n');
-        let firstListIdx = -1;
-        let lastListIdx = -1;
-        let count = 0;
-
-        const itemRegex = /^(\d+[\.\)]|[\*\-])\s+/;
-        for (let i = 0; i < lines.length; i++) {
-            if (itemRegex.test(lines[i].trim())) {
-                if (firstListIdx === -1) firstListIdx = i;
-                lastListIdx = i;
-                count++;
-            } else if (count > 0 && lines[i].trim() === '') {
-                // Allow empty lines between list items
-                continue;
-            } else if (count > 0) {
-                // Non-list item found, if we had a significant list, stop here
-                if (count >= 4) break;
-                // Otherwise reset and keep looking
-                firstListIdx = -1;
-                lastListIdx = -1;
-                count = 0;
-            }
-        }
-
-        if (count >= 4) {
-            const before = lines.slice(0, firstListIdx).join('\n');
-            const after = lines.slice(lastListIdx + 1).join('\n');
-            clean = (before + '\n' + after).trim();
-        }
-    }
-
-    return clean;
+    // Strip SQL code blocks
+    return text.replace(/```sql[\s\S]*?```/gi, '').trim();
 };
 
-const MessageBubble = ({ message, isUser }) => {
-    const hasData = !!(message.table || message.chart);
+const MessageBubble = ({ message, isUser, onRequestPlot }) => {
+    // ✅ Fix 9 — HIDE TECHNICAL TOKENS IN FRONTEND
+    if (message.type === "code" || message.type === "status") return null;
 
     // Process text extraction and cleaning
     let displayTable = message.table;
     let cleanText = message.answer || message.content;
 
     if (!isUser) {
-        if (!displayTable && message.answer) {
-            // Try to extract a table if backend didn't provide one
-            const extracted = extractTableAndCleanText(message.answer);
-            displayTable = extracted.table;
-            cleanText = extracted.cleanText;
-        }
-
-        // Final polish: remove SQL and redundant lists
-        cleanText = cleanResponseText(cleanText, !!(displayTable || message.chart));
+        // Final polish: remove SQL
+        cleanText = cleanResponseText(cleanText);
     }
+
+    // If backend returned a plain sentence list (e.g. "The top 10 companies by revenue are: X with $Y, ..."),
+    // try to parse it into a structured table so the frontend can display and plot it.
+    const parseCompaniesWithRevenue = (text) => {
+        if (!text) return null;
+        // regex: capture "NAME with $1,234,456" or "NAME with 123456" patterns
+        const itemRe = /([A-Z0-9&.,'()\- ]{3,100}?)\s+with\s+\$?([0-9,\.]+)/gi;
+        const rows = [];
+        let m;
+        while ((m = itemRe.exec(text)) !== null) {
+            const name = m[1].trim().replace(/\s{2,}/g, ' ');
+            const revStr = m[2].replace(/,/g, '');
+            const rev = Number(revStr) || null;
+            rows.push({ company: name, revenue: rev });
+        }
+        if (rows.length > 0) {
+            return {
+                columns: ['company', 'revenue'],
+                rows: rows
+            };
+        }
+        return null;
+    };
+
+    const parseNumberedList = (text) => {
+        if (!text) return null;
+        const lines = text.split('\n').filter(l => /^\d+\./.test(l.trim()));
+        if (lines.length < 2) return null;
+        const rows = lines.map(line => {
+            const match = line.match(/^(\d+)\.\s*(.+?)(?:\s+with\s+\$?([0-9,\.]+))?$/i);
+            if (!match) return null;
+            const rank = match[1];
+            const content = match[2].trim();
+            const value = match[3] ? Number(match[3].replace(/,/g, '')) : null;
+
+            if (value !== null) {
+                return { rank, item: content, value };
+            }
+            return { rank, item: content };
+        }).filter(Boolean);
+
+        if (rows.length > 0) {
+            const cols = Object.keys(rows[0]);
+            return { columns: cols, rows };
+        }
+        return null;
+    };
+
+
+    // 🔍 LOG: Track table rendering decisions
+    console.log('📋 MessageBubble Render:', {
+        isUser,
+        hasMessage: !!message,
+        hasAnswer: !!message.answer,
+        hasTable: !!message.table,
+        displayTableValid: !!(displayTable && displayTable.columns && Array.isArray(displayTable.rows) && displayTable.rows.length > 0),
+        displayTable: displayTable
+    });
 
     return (
         <div className={`message-container ${isUser ? 'user' : 'bot'}`}>
@@ -175,10 +126,10 @@ const MessageBubble = ({ message, isUser }) => {
                         </div>
                     )}
 
-                    {/* Explicit Table data from backend */}
-                    {!isUser && displayTable && displayTable.rows?.length > 0 && (
-                        <div className="data-section table-section">
-                            <TableDisplay data={displayTable} />
+                    {/* Explicit Table data from backend - ENHANCED */}
+                    {!isUser && displayTable && displayTable.columns && Array.isArray(displayTable.rows) && displayTable.rows.length > 0 && (
+                        <div className="data-section table-section" style={{ marginTop: '16px' }}>
+                            <TableDisplay data={displayTable} onRequestPlot={onRequestPlot} />
                         </div>
                     )}
 

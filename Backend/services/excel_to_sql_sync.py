@@ -128,17 +128,12 @@ class ExcelToSQLSync:
             # Clean column names (remove spaces, special chars)
             df.columns = [str(col).replace(' ', '_').replace('-', '_') for col in df.columns]
             
-            # Handle NaN values
-            # Using object/Text for 'None' safety if types are mixed used to be tricky, 
-            # but fillna('') generally works for text columns. 
-            # For numeric, pandas handles to_sql normally with NaN as NULL usually. 
-            # The prompt suggested: df = df.fillna('') # Or use None for NULL values
-            # Let's stick to what was requested but be careful with mixed types.
-            # Actually, filling everything with '' turns numeric columns into objects if not careful.
-            # But the Prompt explicitly asked for this code:
-            # df = df.fillna('')
-            # I will follow the prompt's provided code block exactly where possible.
-            df = df.fillna('') 
+            # ✅ Fix 6 — DATA TYPE CORRECTION (CRITICAL)
+            for c in df.columns:
+                if pd.api.types.is_numeric_dtype(df[c]):
+                    df[c] = df[c].fillna(0)
+                else:
+                    df[c] = df[c].fillna('')
             
             # Create table
             if not self.create_table_from_dataframe(df, table_name):

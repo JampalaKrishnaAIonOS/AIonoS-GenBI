@@ -16,16 +16,16 @@ class ChartGenerator:
         """
         q = (question or '').lower()
         
-        # 1. Explicit user intent
-        if 'pie' in q or 'donut' in q:
+        # 1. Explicit user intent - ENHANCED DETECTION
+        if any(word in q for word in ['pie', 'donut', 'proportion', 'distribution']):
             return 'pie'
-        if 'line' in q or 'trend' in q or 'over time' in q:
+        if any(word in q for word in ['line', 'trend', 'over time', 'timeline', 'time series']):
             return 'line'
-        if 'barh' in q or 'horizontal' in q:
+        if 'horizontal' in q or 'barh' in q:
             return 'barh'
-        if 'bar' in q or 'column' in q:
+        if any(word in q for word in ['bar', 'column', 'compare', 'comparison']):
             return 'bar'
-        if 'scatter' in q:
+        if any(word in q for word in ['scatter', 'correlation']):
             return 'scatter'
 
         # 2. Data-driven heuristics
@@ -82,7 +82,14 @@ class ChartGenerator:
 
             # Map columns to X and Y
             x_col = categorical_cols[0] if categorical_cols else df.columns[0]
-            y_col = numeric_cols[0] # Primary metric
+            
+            # Prioritize a metric-like column for Y axis
+            y_col = numeric_cols[0]
+            metric_keywords = ['cost', 'revenue', 'total', 'amount', 'price', 'supply', 'quantity', 'val', 'rate']
+            for col in numeric_cols:
+                if any(k in col.lower() for k in metric_keywords):
+                    y_col = col
+                    break
 
             # 4. Resolve Chart Type
             if not chart_type:

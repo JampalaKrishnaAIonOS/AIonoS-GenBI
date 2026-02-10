@@ -1,19 +1,20 @@
 """
-FIXED Backend Main - Properly handles conversation context and visualization
+ULTRA-LIGHTWEIGHT Backend Main - Simplified Architecture (No Pandas/DataFrame overhead)
 """
 
 import os
 import asyncio
 import logging
 import json
-import numpy as np
+import ast
 from pathlib import Path
 from typing import List
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from fastapi import Request
 from dotenv import load_dotenv
-import pandas as pd
+import re
 from contextlib import asynccontextmanager
 import langchain
 
@@ -26,39 +27,29 @@ logger = logging.getLogger(__name__)
 langchain.verbose = True
 # -----------------------------
 
-
 # Services
 from services.excel_to_sql_sync import ExcelToSQLSync
 from services.sql_agent import SQLAgent
 from services.file_watcher_sql import start_file_watcher_sql
-from services.chart_generator import ChartGenerator
 from services.session_manager import session_manager
 from models.schemas import ChatRequest
 
-
 load_dotenv()
 
-def sanitize_for_json(obj):
-    """Recursively convert numpy/pandas types to standard Python types"""
-    if isinstance(obj, dict):
-        return {k: sanitize_for_json(v) for k, v in obj.items()}
-    elif isinstance(obj, list):
-        return [sanitize_for_json(i) for i in obj]
-    elif isinstance(obj, (np.int64, np.int32, np.int8, np.integer)):
-        return int(obj)
-    elif isinstance(obj, (np.float64, np.float32, np.floating, float)):
-        if not np.isfinite(obj):
-            return None
-        return float(obj)
-    elif isinstance(obj, (np.bool_, bool)):
-        return bool(obj)
-    elif isinstance(obj, (np.datetime64, pd.Timestamp, pd.Period, pd.Interval)):
-        return str(obj)
-    elif isinstance(obj, np.ndarray):
-        return sanitize_for_json(obj.tolist())
-    elif pd.isna(obj):
-        return None
-    return obj
+def parse_raw_sql_result(raw):
+    """Parse raw observation from agent tool into a list of rows"""
+    try:
+        if not raw:
+            return []
+        if isinstance(raw, (list, tuple)):
+            return raw
+        # If it's a string representation of a list/tuple
+        data = ast.literal_eval(str(raw))
+        if isinstance(data, (list, tuple)):
+            return data
+    except Exception as e:
+        logger.warning(f"Failed to parse raw SQL result: {e}")
+    return []
 
 # Global instances
 sql_sync = None
@@ -70,7 +61,7 @@ async def lifespan(app: FastAPI):
     """Startup and shutdown events"""
     global sql_sync, sql_agent, file_observer
     
-    print("🚀 Starting GenBI SQL-based Chatbot...")
+    print("🚀 Starting GenBI Simplified SQL-based Chatbot...")
     
     excel_folder = os.getenv('EXCEL_FOLDER_PATH')
     db_url = os.getenv('DATABASE_URL', 'sqlite:///genbi.db')
@@ -132,147 +123,117 @@ async def health():
         "synced_tables": len(tables)
     }
 
-# FIXED STREAM RESPONSE GENERATOR
 async def stream_response_generator(question: str, session_id: str, conversation_history: List):
-    """Stream SQL agent response with proper table and chart support"""
+    """Stream SQL agent response with raw data parsing and persistence"""
     try:
         logger.info(f"Processing question: {question} (session: {session_id})")
         
-        # Get session for context
-        session = session_manager.get_session(session_id)
+        # Status update
+        yield json.dumps({"type": "status", "content": "Thinking..."}) + "\n"
+        await asyncio.sleep(0.1)
         
-        # ✅ Fix 6 — Add Hard Input Truncation (Safety Net)
-        if len(question) > 1000:
-            logger.warning(f"Truncating long question from {len(question)} to 1000 chars")
-            question = question[:1000]
-            
         question_lower = question.lower().strip()
+        plot_triggers = ['plot', 'plot it', 'show chart', 'visualize', 'visualize it', 'chart it', 'plot the data']
         
-        # ✅ HANDLE "PLOT IT" OR "SHOW CHART" FOR PREVIOUS DATA
-        plot_keywords = ['plot', 'chart', 'visualize', 'graph', 'visual']
-        is_plot_request = any(k in question_lower for k in plot_keywords)
-        # It's a "plot only" request if it's very short and contains one of these, OR is a specific known phrase
-        is_plot_only = is_plot_request and (len(question_lower.split()) <= 4 or question_lower in ['plot it', 'show chart', 'visualize it', 'plot', 'chart it', 'graph it'])
-        
-        if is_plot_only:
-            last_df = session_manager.get_last_dataframe(session_id)
-            
-            # Fallback to last_result in context if last_dataframe is missing
-            if last_df is None or (isinstance(last_df, pd.DataFrame) and last_df.empty):
-                session = session_manager.get_session(session_id)
-                last_result = session.get("context", {}).get("last_result")
-                if isinstance(last_result, pd.DataFrame) and not last_result.empty:
-                    last_df = last_result
-                    logger.info("Recovered previous dataframe from context['last_result']")
-
-            if last_df is None or (isinstance(last_df, pd.DataFrame) and last_df.empty):
-                yield json.dumps({"type": "error", "content": "No previous data available to plot. Please ask a data question first."}) + "\n"
+        # ✅ BACKEND SHORTCUT FOR "PLOT IT"
+        # If it's a plot request and we have a stored table, we can skip the LLM
+        if question_lower in plot_triggers:
+            last_table = session_manager.get_last_table(session_id)
+            if last_table:
+                logger.info("🎯 Plot request detected, found persistent table. Informing UI.")
+                yield json.dumps({"type": "answer_start"}) + "\n"
+                yield json.dumps({"type": "word", "content": "Generating visualization from previous result..."}) + "\n"
+                yield json.dumps({"type": "answer_end"}) + "\n"
+                yield json.dumps({"type": "table", "content": last_table}) + "\n"
                 yield json.dumps({"type": "complete"}) + "\n"
                 return
-            
-            yield json.dumps({"type": "status", "content": "Generating visualization for previous data..."}) + "\n"
-            await asyncio.sleep(0.1)
-            
-            # Use last DF for chart
-            df = last_df
-            answer = "Here is the visualization of the data we just discussed."
-            sql_query = None
-            result_type = 'dataframe'
-        else:
-            # Status update
-            yield json.dumps({"type": "status", "content": "Generating SQL query..."}) + "\n"
-            await asyncio.sleep(0.1)
-            
-            # ✅ Fix 1 — Limit Conversation History (MOST IMPORTANT)
-            short_history = conversation_history[-4:] if conversation_history else []
-            result = sql_agent.query(question, conversation_history=short_history)
-            
-            if not result['success']:
-                yield json.dumps({"type": "error", "content": result.get('error', 'Unknown error')}) + "\n"
-                yield json.dumps({"type": "complete"}) + "\n"
-                return
-            
-            answer = result['answer']
-            sql_query = result['sql_query']
-            df = result['data']
-            # HIGH CONFIDENCE LOGGING
-            logger.info(f"DEBUG after agent: success={result['success']}, df type={type(df)}, rows={len(df) if df is not None else 'None'}")
-            if result.get('success') and df is not None:
-                logger.info(f"DEBUG agent result keys: {list(result.keys())}")
-                if isinstance(df, pd.DataFrame):
-                    logger.info(f"DEBUG first few rows sample:\n{df.head(2).to_string()}")
-            
-        # ALWAYS store dataframe if we have one
-        if df is not None and isinstance(df, pd.DataFrame) and not df.empty:
-            logger.info(f"DEBUG: Setting last_dataframe with {len(df)} rows")
-            session_manager.set_last_dataframe(session_id, df)
-            # Also sync to context for fallback recovery
-            session_manager.update_context(session_id, last_result=df)
 
-        # Stream answer with markdown formatting
+        # Limit Conversation History
+        short_history = conversation_history[-4:] if conversation_history else []
+        
+        # Execute query via SQLAgent (returns raw rows)
+        result = sql_agent.query(question, session_id=session_id, conversation_history=short_history)
+        
+        if not result['success']:
+            yield json.dumps({"type": "error", "content": result.get('answer', 'Unknown error')}) + "\n"
+            yield json.dumps({"type": "complete"}) + "\n"
+            return
+        
+        answer = result['answer']
+        sql_query = result.get('sql_query')
+        raw_result = result.get('raw_result')
+        extracted_cols = result.get('columns', [])
+        
+        # Stream answer
         yield json.dumps({"type": "answer_start"}) + "\n"
-        
-        import re
-        tokens = re.split(r'(\s+)', answer)
+        tokens = re.split(r'(\s+)', str(answer))
         for token in tokens:
             if token:
                 yield json.dumps({"type": "word", "content": token}) + "\n"
-                await asyncio.sleep(0.01)
-        
+                await asyncio.sleep(0.005)
         yield json.dumps({"type": "answer_end"}) + "\n"
+
+        if result.get('raw_result') or raw_result:
+            logger.info(f"DEBUG: raw_result is present. Type: {type(raw_result or result.get('raw_result'))}")
+        else:
+            logger.warning("DEBUG: raw_result is MISSING from agent response")
+
+        # Parse Raw Rows
+        rows = parse_raw_sql_result(raw_result)
+        logger.info(f"DEBUG: Parsed rows: {len(rows) if rows else 0}")
         
-        # Send SQL query for transparency
-        if sql_query:
-            yield json.dumps({"type": "code", "content": sql_query}) + "\n"
-        
-        # ✅ SEND TABLE DATA IF DATAFRAME EXISTS
-        if df is not None:
-            # Prepare table data for frontend
-            table_data = {
-                "columns": [str(c) for c in df.columns],
-                "rows": sanitize_for_json(df.head(100).to_dict(orient="records"))
-            }
-            yield json.dumps({"type": "table", "content": table_data}) + "\n"
-            
-            # ✅ AUTO-GENERATE CHART ONLY IF USER EXPLICITLY ASKS FOR VISUALIZATION
-            # As per user feedback, visualization should only come when mentioned (plot, chart, etc.)
-            should_chart = is_plot_request or any(kw in question_lower for kw in ['plot', 'chart', 'graph', 'visualize', 'visualization'])
-            
-            # Allow skipping if explicitly told not to
-            skip_chart = any(k in question_lower for k in ['no chart', 'no plot', 'without chart', 'only table', 'just table'])
-            if skip_chart:
-                should_chart = False
-            
-            logger.info(f"DEBUG visualization decision: should_chart={should_chart}, is_plot_request={is_plot_request}, df_rows={len(df) if df is not None else 'None'}")
-            
-            if not skip_chart and should_chart and df is not None:
-                try:
-                    # 3️⃣ Send DataFrame directly to ChartGenerator
-                    logger.info("Generating chart using ChartGenerator...")
-                    chart = ChartGenerator.generate_chart(df, title=question)
-                    if chart and chart.get('type') == 'chart':
-                        yield json.dumps({"type": "chart", "content": chart}) + "\n"
-                except Exception as chart_err:
-                    logger.error(f"Visualization pipeline failed: {chart_err}")
-                    if is_plot_request:
-                        yield json.dumps({"type": "error", "content": f"Visualization failed: {str(chart_err)}"}) + "\n"
-        
+        if rows and isinstance(rows, (list, tuple)) and len(rows) > 0:
+            try:
+                # Build column names
+                first_row = rows[0]
+                num_data_cols = len(first_row) if isinstance(first_row, (list, tuple)) else 1
+                
+                # Use extracted columns if they match the data count, else use generic
+                if len(extracted_cols) == num_data_cols:
+                    columns = extracted_cols
+                else:
+                    columns = ["Column_" + str(i+1) for i in range(num_data_cols)]
+
+                # Build Table Payload
+                table_rows = []
+                for row in rows:
+                    if isinstance(row, (list, tuple)):
+                        table_rows.append({columns[i]: row[i] for i in range(min(len(row), len(columns)))})
+                    else:
+                        table_rows.append({columns[0]: row})
+
+                table_data = {
+                    "columns": columns,
+                    "rows": table_rows
+                }
+
+                logger.info(f"📤 Sending table: {len(columns)} columns × {len(table_rows)} rows")
+                yield json.dumps({"type": "table", "content": table_data}) + "\n"
+                
+                # ✅ PERSIST TABLE FOR PLOTTING
+                session_manager.set_last_table(session_id, table_data)
+
+                # Update session with last query/data info if needed (minimal)
+                if sql_query:
+                    session_manager.set_last_sql(session_id, sql_query)
+                
+            except Exception as table_err:
+                logger.error(f"❌ Table parsing failed: {table_err}")
+                yield json.dumps({"type": "error", "content": f"Table parsing failed: {str(table_err)}"}) + "\n"
+        else:
+             logger.info("ℹ️ No rows found to send as table")
+
         # Update session history
         session_manager.add_to_history(session_id, "user", question)
-        session_manager.add_to_history(session_id, "assistant", answer)
-        
-        # ✅ Fix 7 — Clear Session Context When It Grows
+        session_manager.add_to_history(session_id, "assistant", str(answer))
         session_manager.trim_history(session_id, max_messages=10)
         
         yield json.dumps({"type": "complete"}) + "\n"
         
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        error_msg = f"System error: {str(e)}"
-        yield json.dumps({"type": "error", "content": error_msg}) + "\n"
+        logger.error(f"Stream error: {e}", exc_info=True)
+        yield json.dumps({"type": "error", "content": str(e)}) + "\n"
         yield json.dumps({"type": "complete"}) + "\n"
-        return # 🔥 REQUIRED
 
 @app.post("/chat/stream")
 async def chat_stream(request: ChatRequest):
@@ -283,6 +244,79 @@ async def chat_stream(request: ChatRequest):
             request.session_id,
             request.conversation_history
         ),
+        media_type="text/event-stream"
+    )
+
+async def plot_response_generator(table_obj, x_col, y_col, session_id: str):
+    """Stream a simple Plotly chart generated from the provided table object without Pandas."""
+    try:
+        yield json.dumps({"type": "status", "content": "Preparing visualization..."}) + "\n"
+        await asyncio.sleep(0.05)
+
+        rows = table_obj.get('rows', [])
+        if not rows:
+            yield json.dumps({"type": "error", "content": "No data to plot."}) + "\n"
+            yield json.dumps({"type": "complete"}) + "\n"
+            return
+
+        # Simple insight
+        insight = f"### **Plot — {y_col} vs {x_col}**\n\nGenerated from table data.\n"
+        
+        yield json.dumps({"type": "answer_start"}) + "\n"
+        for token in re.split(r'(\s+)', insight):
+            if token:
+                yield json.dumps({"type": "word", "content": token}) + "\n"
+                await asyncio.sleep(0.005)
+        yield json.dumps({"type": "answer_end"}) + "\n"
+
+        # Build Plotly object manually
+        x_data = [r.get(x_col) for r in rows]
+        y_data = []
+        for r in rows:
+            val = r.get(y_col)
+            try:
+                y_data.append(float(val) if val is not None else 0)
+            except:
+                y_data.append(0)
+
+        chart_payload = {
+            "type": "chart",
+            "content": {
+                "type": "chart",
+                "data": {
+                    "data": [{
+                        "x": x_data,
+                        "y": y_data,
+                        "type": "bar",
+                        "marker": {"color": "#4f46e5"}
+                    }],
+                    "layout": {
+                        "title": f"{y_col} by {x_col}",
+                        "xaxis": {"title": x_col},
+                        "yaxis": {"title": y_col},
+                        "template": "plotly_white"
+                    }
+                }
+            }
+        }
+        
+        yield json.dumps(chart_payload) + "\n"
+        yield json.dumps({"type": "complete"}) + "\n"
+    except Exception as e:
+        yield json.dumps({"type": "error", "content": f"Plot error: {str(e)}"}) + "\n"
+        yield json.dumps({"type": "complete"}) + "\n"
+
+@app.post("/plot/stream")
+async def plot_stream(request: Request):
+    """Accepts JSON: { table: { columns: [...], rows: [...] }, x: 'col', y: 'col', session_id: '...'}"""
+    body = await request.json()
+    return StreamingResponse(
+        plot_response_generator(
+            body.get('table'), 
+            body.get('x'), 
+            body.get('y'), 
+            body.get('session_id')
+        ), 
         media_type="text/event-stream"
     )
 
@@ -302,6 +336,7 @@ async def reindex():
 
 if __name__ == "__main__":
     import uvicorn
-    host = os.getenv("HOST")
-    port = int(os.getenv("PORT"))
+    # Using defaults if env not set
+    host = os.getenv("HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", "8000"))
     uvicorn.run(app, host=host, port=port)

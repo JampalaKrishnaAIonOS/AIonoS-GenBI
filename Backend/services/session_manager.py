@@ -54,15 +54,24 @@ class SessionManager:
         if "last_result" in kwargs:
             lr = kwargs["last_result"]
             
+            # Use safe type checking instead of .get() on possible DataFrame
+            import pandas as pd
+            is_df = isinstance(lr, (pd.DataFrame, pd.Series))
+            
             # Always update context with the last result regardless of type
             session["context"]["last_result"] = lr
             
-            # Allow chart to be stored as a successful result to enable "plot it" to work on pure charts if needed,
-            # though generally "plot it" works on data. 
-            # User specific request: permit 'chart' type.
-            if lr.get("type") in ["dataframe", "series", "chart"]:
+            # If it's a data object, mark as last successful for plotting
+            if is_df:
+                session["last_df"] = lr
                 session["last_successful_result"] = lr
-                session["stale_error"] = False  # Clear false errors
+                session["stale_error"] = False
+            elif isinstance(lr, dict) and lr.get("type") in ["dataframe", "series"]:
+                session["last_successful_result"] = lr
+                session["stale_error"] = False
+        
+        if "last_sql" in kwargs:
+            session["last_sql"] = kwargs["last_sql"]
         
         session['context'].update(kwargs)
 
@@ -82,6 +91,26 @@ class SessionManager:
         """Retrieve the last stored dataframe"""
         session = self.get_session(session_id)
         return session.get('last_df')
+    
+    def set_last_sql(self, session_id: str, sql: str):
+        """Specifically store a SQL query for reuse"""
+        session = self.get_session(session_id)
+        session['last_sql'] = sql
+    
+    def get_last_sql(self, session_id: str):
+        """Retrieve the last stored SQL query"""
+        session = self.get_session(session_id)
+        return session.get('last_sql')
+    
+    def set_last_table(self, session_id: str, table_data: Dict[str, Any]):
+        """Specifically store a table object for plotting/reuse"""
+        session = self.get_session(session_id)
+        session['last_table'] = table_data
+        
+    def get_last_table(self, session_id: str):
+        """Retrieve the last stored table object"""
+        session = self.get_session(session_id)
+        return session.get('last_table')
     
     def cleanup_old_sessions(self):
         """Remove expired sessions"""
